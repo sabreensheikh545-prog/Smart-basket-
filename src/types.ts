@@ -10,6 +10,9 @@ export interface Product {
   name: string;
   description: string;
   price: number;
+  mrp?: number;
+  rating?: number;
+  reviews?: number;
   stock: number;
   image: string;
   created_at: string;
@@ -52,15 +55,24 @@ export interface CartEntry {
   quantity: number;
 }
 
-export interface PhpFileEntry {
-  path: string;
-  isBinary: boolean;
-  content?: string;
+export function formatINR(amount: number): string {
+  const num = Number(amount || 0);
+  const hasDecimals = Math.round(num * 100) % 100 !== 0;
+  return (
+    '₹' +
+    num.toLocaleString('en-IN', {
+      minimumFractionDigits: hasDecimals ? 2 : 0,
+      maximumFractionDigits: hasDecimals ? 2 : 0,
+    })
+  );
 }
 
-export function formatINR(amount: number): string {
-  return '₹' + Number(amount || 0).toLocaleString('en-IN', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
+export function getDiscountPercent(price: number, mrp?: number): number {
+  const original = mrp && mrp > price ? mrp : Math.round(price * 1.35);
+  if (original <= price) return 0;
+  return Math.round(((original - price) / original) * 100);
+}
+
+export function getEffectiveMrp(price: number, mrp?: number): number {
+  return mrp && mrp > price ? mrp : Math.round((price * 1.35) / 10) * 10 - 1;
 }

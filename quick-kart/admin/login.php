@@ -61,7 +61,7 @@ if (isAdminLoggedIn()) {
             <i class="fa-solid fa-shield-halved text-xl"></i>
         </div>
         <h1 class="mt-3 text-xl font-extrabold text-slate-900">Quick Kart Admin</h1>
-        <p class="mt-1 text-xs text-slate-500">Sign in to manage catalog, orders &amp; users</p>
+        <p class="mt-1 text-xs text-slate-500">Default credentials: Seraj / seraj123</p>
     </div>
 
     <div id="adminErrBox" class="hidden mb-4 p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium flex items-center gap-2">
@@ -73,7 +73,7 @@ if (isAdminLoggedIn()) {
         <input type="hidden" name="ajax_action" value="admin_login">
         <div>
             <label class="block text-xs font-semibold text-slate-700 mb-1.5">Username</label>
-            <input type="text" name="username" required placeholder="admin"
+            <input type="text" name="username" required placeholder="Seraj"
                 class="w-full h-11 px-4 rounded-xl bg-slate-50 border border-slate-200 text-sm focus:bg-white focus:border-orange-500 focus:outline-none">
         </div>
         <div>

@@ -63,7 +63,7 @@ interface Order {
 
 const state = {
   nextId: { cat: 6, prod: 7, user: 2, order: 3, item: 4 },
-  admin: { id: 1, username: 'admin', password: 'admin123' },
+  admin: { id: 1, username: 'Seraj', password: 'seraj123' },
   categories: [
     { id: 1, name: 'Audio', image: '/src/assets/images/product_earbuds_1794891797883.jpg' },
     { id: 2, name: 'Wearables', image: '/src/assets/images/product_smartwatch_1794891795980.jpg' },

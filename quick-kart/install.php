@@ -106,16 +106,16 @@ if ($conn->connect_errno) {
     }
     $messages[] = 'Asset directories verified.';
 
-    // 4. Insert Default Admin Credentials (admin / admin123)
-    $checkAdmin = $conn->query("SELECT id FROM admin WHERE username = 'admin' LIMIT 1");
+    // 4. Insert Default Admin Credentials (Seraj / seraj123)
+    $checkAdmin = $conn->query("SELECT id FROM admin WHERE username = 'Seraj' LIMIT 1");
     if ($checkAdmin && $checkAdmin->num_rows === 0) {
-        $hashedAdminPass = password_hash('admin123', PASSWORD_DEFAULT);
+        $hashedAdminPass = password_hash('seraj123', PASSWORD_DEFAULT);
         $stmt = $conn->prepare("INSERT INTO admin (username, password) VALUES (?, ?)");
-        $defaultUser = 'admin';
+        $defaultUser = 'Seraj';
         $stmt->bind_param('ss', $defaultUser, $hashedAdminPass);
         $stmt->execute();
         $stmt->close();
-        $messages[] = 'Default admin inserted (admin / admin123).';
+        $messages[] = 'Default admin inserted (Seraj / seraj123).';
     }
 
     // 5. Seed Sample Categories & Products if Empty
