@@ -32,8 +32,14 @@ jobs:
 
       - name: Setup Capacitor and Build APK
         run: |
-          npm install @capacitor/core @capacitor/cli @capacitor/android --legacy-peer-deps
-          npx cap init "Smart Basket" "com.smartbasket.app" --web-dir=dist
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 --legacy-peer-deps
+          cat << 'EOF' > capacitor.config.json
+          {
+            "appId": "com.smartbasket.app",
+            "appName": "Smart Basket",
+            "webDir": "dist"
+          }
+          EOF
           npx cap add android
           npx cap sync
           cd android
