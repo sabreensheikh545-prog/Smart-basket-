@@ -1,0 +1,6 @@
+{
+  "name": "Quick Kart",
+  "description": "Mobile-first E-commerce web application with PHP, MySQL, Tailwind CSS, AJAX, and Font Awesome.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
