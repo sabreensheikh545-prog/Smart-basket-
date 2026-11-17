@@ -27,12 +27,12 @@ jobs:
 
       - name: Install dependencies and build web app
         run: |
-          npm install
+          npm install --legacy-peer-deps
           npm run build
 
       - name: Setup Capacitor and Build APK
         run: |
-          npm install @capacitor/core @capacitor/cli @capacitor/android
+          npm install @capacitor/core @capacitor/cli @capacitor/android --legacy-peer-deps
           npx cap init "Smart Basket" "com.smartbasket.app" --web-dir=dist
           npx cap add android
           npx cap sync
