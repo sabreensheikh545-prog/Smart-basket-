@@ -489,6 +489,11 @@ export async function placeOrderFirestore(payload: {
   email: string;
   address: string;
   paymentMethod?: string;
+  utr_number?: string;
+  subtotal_amount?: number;
+  gst_amount?: number;
+  total_amount?: number;
+  seller_gstin?: string;
   items: { product: Product; quantity: number }[];
 }): Promise<{ success: boolean; message: string; order?: Order }> {
   if (!payload.name.trim() || !payload.phone.trim() || !payload.address.trim() || payload.items.length === 0) {
@@ -504,11 +509,16 @@ export async function placeOrderFirestore(payload: {
   try {
     const orderNumber = Math.floor(100000 + (Date.now() % 900000));
     const nowIso = new Date().toISOString();
-    let total = 0;
+    let subtotal = 0;
+    let totalGst = 0;
 
     const orderItems: OrderItem[] = payload.items.map((entry, idx) => {
       const qty = Math.max(1, entry.quantity);
-      total += entry.product.price * qty;
+      const gstRate = entry.product.gst_rate ?? 0;
+      const itemSub = entry.product.price * qty;
+      const itemGst = Math.round((itemSub * gstRate) / 100);
+      subtotal += itemSub;
+      totalGst += itemGst;
       return {
         id: idx + 1,
         order_id: orderNumber,
@@ -518,9 +528,13 @@ export async function placeOrderFirestore(payload: {
         product_image: entry.product.image,
         quantity: qty,
         price: entry.product.price,
+        gst_rate: gstRate,
       };
     });
 
+    const finalSub = payload.subtotal_amount ?? subtotal;
+    const finalGst = payload.gst_amount ?? totalGst;
+    const total = payload.total_amount ?? finalSub + finalGst;
     const paymentMethod = payload.paymentMethod || 'Cash on Delivery';
     const orderDocRef = doc(collection(db, 'orders'));
 
@@ -534,13 +548,19 @@ export async function placeOrderFirestore(payload: {
       email: payload.email.trim().toLowerCase(),
       address: payload.address.trim(),
       items: orderItems,
+      subtotal_amount: finalSub,
+      gst_amount: finalGst,
       total,
       total_amount: total,
       paymentMethod,
+      utr_number: payload.utr_number?.trim() || '',
+      payment_verified: false,
+      seller_gstin: payload.seller_gstin || '07AABCS1429B1Z5',
       status: 'Placed' as const,
       createdAt: nowIso,
       created_at: nowIso,
     };
+        
 
     await setDoc(orderDocRef, orderPayload);
 
