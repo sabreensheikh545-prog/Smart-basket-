@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AdminView } from './components/AdminView';
 import {
   ASSETS,
@@ -71,6 +71,8 @@ export default function App() {
   const [mode, setMode] = useState<'user' | 'admin'>('user');
   const [page, setPage] = useState<UserPage>('home');
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [adminUnlockedByTap, setAdminUnlockedByTap] = useState(false);
+  const logoTapTimestampsRef = useRef<number[]>([]);
 
   // Offline localStorage data
   const [categories, setCategories] = useState<Category[]>([]);
@@ -99,8 +101,8 @@ export default function App() {
 
   // Auth Forms
   const [authTab, setAuthTab] = useState<'login' | 'signup'>('login');
-  const [loginIdentifier, setLoginIdentifier] = useState('user@quickkart.com');
-  const [loginPassword, setLoginPassword] = useState('123456');
+  const [loginIdentifier, setLoginIdentifier] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
   const [signupName, setSignupName] = useState('');
   const [signupContact, setSignupContact] = useState('');
   const [signupPassword, setSignupPassword] = useState('');
@@ -672,6 +674,15 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => {
+                    const now = Date.now();
+                    const recentTaps = [...logoTapTimestampsRef.current.filter((t) => now - t < 2500), now];
+                    if (recentTaps.length >= 5) {
+                      logoTapTimestampsRef.current = [];
+                      setAdminUnlockedByTap(true);
+                      setSidebarOpen(true);
+                    } else {
+                      logoTapTimestampsRef.current = recentTaps;
+                    }
                     setFilterCatId(0);
                     setSearchQuery('');
                     setPage('home');
@@ -679,7 +690,7 @@ export default function App() {
                   className="flex items-center gap-1.5 whitespace-nowrap shrink-0"
                 >
                   <span className="text-lg sm:text-xl font-extrabold italic tracking-tight text-white">
-                    Quick <span className="text-[#FFE500]">Kart</span>
+                    Smart <span className="text-[#FFE500]">Basket</span>
                   </span>
                   <i className="fa-solid fa-bolt text-[#FFE500] text-xs"></i>
                 </button>
@@ -797,7 +808,7 @@ export default function App() {
             <div className="px-5 py-4 bg-[#2874F0] text-white flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <span className="text-lg font-extrabold italic">
-                  Quick <span className="text-[#FFE500]">Kart</span>
+                  Smart <span className="text-[#FFE500]">Basket</span>
                 </span>
                 <i className="fa-solid fa-bolt text-[#FFE500] text-xs"></i>
               </div>
@@ -855,19 +866,21 @@ export default function App() {
                 </button>
               ))}
 
-              <div className="pt-3 mt-3 border-t border-slate-100">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSidebarOpen(false);
-                    setMode('admin');
-                  }}
-                  className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-slate-700 hover:bg-slate-100"
-                >
-                  <i className="fa-solid fa-shield-halved w-5 text-center text-[#2874F0]"></i>
-                  <span>Seller / Admin Panel</span>
-                </button>
-              </div>
+              {(currentUser?.email?.trim().toLowerCase() === 'sabreensheikh545@gmail.com' || adminUnlockedByTap) && (
+                <div className="pt-3 mt-3 border-t border-slate-100">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSidebarOpen(false);
+                      setMode('admin');
+                    }}
+                    className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-slate-700 hover:bg-slate-100"
+                  >
+                    <i className="fa-solid fa-shield-halved w-5 text-center text-[#2874F0]"></i>
+                    <span>Seller / Admin Panel</span>
+                  </button>
+                </div>
+              )}
             </nav>
 
             <div className="p-4 border-t border-slate-100">
@@ -1502,14 +1515,16 @@ export default function App() {
                 </button>
               </form>
 
-              <div className="grid grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  onClick={() => setMode('admin')}
-                  className="h-11 rounded-lg bg-white border border-slate-200 text-[#2874F0] text-sm font-bold flex items-center justify-center gap-2 hover:bg-blue-50"
-                >
-                  <i className="fa-solid fa-shield-halved"></i> Seller Admin
-                </button>
+              <div className={`grid gap-3 ${currentUser.email?.trim().toLowerCase() === 'sabreensheikh545@gmail.com' || adminUnlockedByTap ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                {(currentUser.email?.trim().toLowerCase() === 'sabreensheikh545@gmail.com' || adminUnlockedByTap) && (
+                  <button
+                    type="button"
+                    onClick={() => setMode('admin')}
+                    className="h-11 rounded-lg bg-white border border-slate-200 text-[#2874F0] text-sm font-bold flex items-center justify-center gap-2 hover:bg-blue-50"
+                  >
+                    <i className="fa-solid fa-shield-halved"></i> Seller / Admin Panel
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {
@@ -1586,7 +1601,7 @@ export default function App() {
                           value={loginIdentifier}
                           onChange={(e) => setLoginIdentifier(e.target.value)}
                           required
-                          placeholder="user@quickkart.com or phone"
+                          placeholder="Enter email or phone number"
                           className="w-full h-11 px-4 rounded-lg bg-slate-50 border border-slate-200 text-sm focus:bg-white focus:border-[#2874F0] focus:outline-none"
                         />
                       </div>
@@ -1601,9 +1616,6 @@ export default function App() {
                           className="w-full h-11 px-4 rounded-lg bg-slate-50 border border-slate-200 text-sm focus:bg-white focus:border-[#2874F0] focus:outline-none"
                         />
                       </div>
-                      <p className="text-xs text-slate-500">
-                        Demo Customer: <span className="font-semibold text-slate-700">user@quickkart.com / 123456</span>
-                      </p>
                       <button
                         type="submit"
                         className="w-full h-11 rounded-lg bg-[#FB641B] text-white text-sm font-bold hover:bg-[#e55812] transition"
@@ -1655,16 +1667,6 @@ export default function App() {
                       </button>
                     </form>
                   )}
-
-                  <div className="mt-5 pt-4 border-t border-slate-100 text-center">
-                    <button
-                      type="button"
-                      onClick={() => setMode('admin')}
-                      className="text-xs font-bold text-[#2874F0] hover:underline"
-                    >
-                      Admin / Seller Login <i className="fa-solid fa-arrow-right ml-1 text-[10px]"></i>
-                    </button>
-                  </div>
                 </div>
               </div>
             </main>
