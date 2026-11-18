@@ -134,7 +134,11 @@ export default function App() {
   const [checkoutName, setCheckoutName] = useState('');
   const [checkoutPhone, setCheckoutPhone] = useState('');
   const [checkoutAddress, setCheckoutAddress] = useState('');
-
+    const STORE_UPI_ID = 'sabreensheikh@upi';
+  const STORE_GSTIN = '07AABCS1429B1Z5';
+  const [paymentMethod, setPaymentMethod] = useState<'UPI' | 'Cash on Delivery'>('UPI');
+  const [utrNumber, setUtrNumber] = useState('');
+  
   // Orders View
   const [orderTab, setOrderTab] = useState<'active' | 'history'>('active');
   const [expandedOrderIds, setExpandedOrderIds] = useState<number[]>([]);
@@ -369,7 +373,16 @@ export default function App() {
     () => cart.reduce((acc, item) => acc + getEffectiveMrp(item.product.price, item.product.mrp) * item.quantity, 0),
     [cart]
   );
-
+    const cartGstTotal = useMemo(
+    () =>
+      cart.reduce(
+        (acc, item) => acc + Math.round((item.product.price * item.quantity * (item.product.gst_rate ?? 0)) / 100),
+        0
+      ),
+    [cart]
+  );
+  const grandTotal = cartTotal + cartGstTotal;
+  
   const filteredProducts = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     const list = products.filter((p) => {
@@ -651,7 +664,16 @@ export default function App() {
         onConfirm: () => setPage('login'),
       });
       return;
+    }   
+    if (paymentMethod === 'UPI' && !/^\d{12}$/.test(utrNumber.trim())) {
+      showModal({
+        title: 'Invalid UTR Number',
+        message: 'Please enter the exact 12-digit UPI UTR / Reference number after paying.',
+        type: 'error',
+      });
+      return;
     }
+    
     showLoader('Placing order...');
     const res = await placeOrderFirestore({
       userId: currentUser.uid || auth.currentUser?.uid || String(currentUser.id),
@@ -660,7 +682,8 @@ export default function App() {
       phone: checkoutPhone,
       email: currentUser.email || auth.currentUser?.email || '',
       address: checkoutAddress,
-      paymentMethod: 'Cash on Delivery',
+      paymentMethod: paymentMethod === 'UPI' ? `UPI (${STORE_UPI_ID})` : 'Cash on Delivery',
+      
       items: cart.map((c) => ({ product: c.product, quantity: c.quantity })),
     });
     hideLoader();
