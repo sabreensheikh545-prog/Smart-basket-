@@ -1,15 +1,28 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  EmailAuthProvider,
+  createUserWithEmailAndPassword,
+  getRedirectResult,
+  onAuthStateChanged,
+  reauthenticateWithCredential,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+  signInWithRedirect,
+  signOut,
+  updatePassword,
+  updateProfile,
+} from 'firebase/auth';
 import { AdminView } from './components/AdminView';
+import { auth, getFirebaseAuthErrorMessage, googleProvider } from './firebase';
 import {
   ASSETS,
   cancelOrderLocal,
   changePasswordLocal,
   getBootstrapData,
-  loginUserLocal,
   placeOrderLocal,
   saveCart,
   setStoredCurrentUser,
-  signupUserLocal,
+  syncFirebaseCustomerLocal,
   updateProfileLocal,
 } from './store/localStore';
 import {
@@ -99,14 +112,16 @@ export default function App() {
   // Cart
   const [cart, setCart] = useState<CartEntry[]>([]);
 
-  // Auth Forms
+  // Customer Email/Password & Google Auth
   const [authTab, setAuthTab] = useState<'login' | 'signup'>('login');
-  const [loginIdentifier, setLoginIdentifier] = useState('');
-  const [loginPassword, setLoginPassword] = useState('');
-  const [signupName, setSignupName] = useState('');
-  const [signupContact, setSignupContact] = useState('');
-  const [signupPassword, setSignupPassword] = useState('');
+  const [authName, setAuthName] = useState('');
+  const [authPhone, setAuthPhone] = useState('');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [showAuthPassword, setShowAuthPassword] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState('');
+  const isAuthActionInFlightRef = useRef(false);
 
   // Checkout Form
   const [checkoutName, setCheckoutName] = useState('');
@@ -174,6 +189,51 @@ export default function App() {
     }, 4200);
     return () => window.clearInterval(timer);
   }, [mode, page]);
+
+  // Handle Google redirect completion & Firebase auth state synchronization
+  useEffect(() => {
+    let active = true;
+
+    getRedirectResult(auth)
+      .then((result) => {
+        if (!active || !result?.user?.email) return;
+        const sync = syncFirebaseCustomerLocal({
+          name: result.user.displayName || undefined,
+          email: result.user.email,
+          phone: result.user.phoneNumber || undefined,
+        });
+        if (sync.success && sync.user) {
+          loadBootstrap();
+          setCurrentUser(sync.user);
+          setPage((prev) => (prev === 'login' ? 'home' : prev));
+        } else if (!sync.success) {
+          setAuthError(sync.message);
+        }
+      })
+      .catch((err) => {
+        if (!active) return;
+        setAuthError(getFirebaseAuthErrorMessage(err));
+      });
+
+    const unsubscribe = onAuthStateChanged(auth, (fbUser) => {
+      if (!active || isAuthActionInFlightRef.current) return;
+      if (fbUser?.email) {
+        const sync = syncFirebaseCustomerLocal({
+          name: fbUser.displayName || undefined,
+          email: fbUser.email,
+          phone: fbUser.phoneNumber || undefined,
+        });
+        if (sync.success && sync.user) {
+          setCurrentUser(sync.user);
+        }
+      }
+    });
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [loadBootstrap]);
 
   // Mobile UX restrictions: disable right-click, text selection, and zoom
   useEffect(() => {
@@ -310,40 +370,156 @@ export default function App() {
     });
   };
 
-  const handleLogin = (e: React.FormEvent) => {
-    e.preventDefault();
+  const completeCustomerLogin = (user: User) => {
+    loadBootstrap();
+    setCurrentUser(user);
     setAuthError('');
+    setAuthPassword('');
+    setPage('home');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleEmailLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (authBusy) return;
+    const email = authEmail.trim();
+    if (!email || !authPassword) {
+      setAuthError('Please enter your email address and password.');
+      return;
+    }
+
+    setAuthError('');
+    setAuthBusy(true);
+    isAuthActionInFlightRef.current = true;
     showLoader('Signing in...');
-    const res = loginUserLocal(loginIdentifier, loginPassword);
-    hideLoader();
-    if (res.success && res.user) {
-      setCurrentUser(res.user);
-      setPage(cart.length > 0 ? 'checkout' : 'home');
-    } else {
-      setAuthError(res.message);
+
+    try {
+      const cred = await signInWithEmailAndPassword(auth, email, authPassword);
+      const res = syncFirebaseCustomerLocal({
+        name: cred.user.displayName || undefined,
+        email: cred.user.email || email,
+        phone: cred.user.phoneNumber || undefined,
+      });
+      if (!res.success || !res.user) {
+        setAuthError(res.message || 'Unable to sign in.');
+        return;
+      }
+      completeCustomerLogin(res.user);
+    } catch (error) {
+      setAuthError(getFirebaseAuthErrorMessage(error));
+    } finally {
+      isAuthActionInFlightRef.current = false;
+      hideLoader();
+      setAuthBusy(false);
     }
   };
 
-  const handleSignup = (e: React.FormEvent) => {
+  const handleEmailSignup = async (e: React.FormEvent) => {
     e.preventDefault();
-    setAuthError('');
-    showLoader('Creating account...');
-    const res = signupUserLocal({
-      name: signupName,
-      contact: signupContact,
-      password: signupPassword,
-    });
-    hideLoader();
-    if (res.success && res.user) {
-      loadBootstrap();
-      setCurrentUser(res.user);
-      setSignupName('');
-      setSignupContact('');
-      setSignupPassword('');
-      setPage(cart.length > 0 ? 'checkout' : 'home');
-    } else {
-      setAuthError(res.message);
+    if (authBusy) return;
+    const name = authName.trim();
+    const cleanDigits = authPhone.replace(/\D/g, '');
+    const email = authEmail.trim();
+
+    if (!name || name.length < 2) {
+      setAuthError('Please enter your full name.');
+      return;
     }
+    if (cleanDigits.length !== 10) {
+      setAuthError('Please enter a valid 10-digit Indian mobile number.');
+      return;
+    }
+    if (!email || !email.includes('@')) {
+      setAuthError('Please enter a valid email address.');
+      return;
+    }
+    if (authPassword.length < 6) {
+      setAuthError('Password must be at least 6 characters long.');
+      return;
+    }
+
+    setAuthError('');
+    setAuthBusy(true);
+    isAuthActionInFlightRef.current = true;
+    showLoader('Creating your account...');
+
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, email, authPassword);
+      await updateProfile(cred.user, { displayName: name }).catch(() => {});
+      const res = syncFirebaseCustomerLocal({
+        name,
+        email: cred.user.email || email,
+        phone: cleanDigits,
+      });
+      if (!res.success || !res.user) {
+        setAuthError(res.message || 'Unable to create account.');
+        return;
+      }
+      completeCustomerLogin(res.user);
+    } catch (error) {
+      setAuthError(getFirebaseAuthErrorMessage(error));
+    } finally {
+      isAuthActionInFlightRef.current = false;
+      hideLoader();
+      setAuthBusy(false);
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    if (authBusy) return;
+    setAuthError('');
+    setAuthBusy(true);
+    isAuthActionInFlightRef.current = true;
+    showLoader('Connecting with Google...');
+
+    try {
+      const cred = await signInWithPopup(auth, googleProvider);
+      const email = cred.user.email;
+      if (!email) {
+        setAuthError('Google account did not return an email address.');
+        return;
+      }
+      const res = syncFirebaseCustomerLocal({
+        name: cred.user.displayName || undefined,
+        email,
+        phone: cred.user.phoneNumber || undefined,
+      });
+      if (!res.success || !res.user) {
+        setAuthError(res.message || 'Unable to sign in with Google.');
+        return;
+      }
+      completeCustomerLogin(res.user);
+    } catch (error) {
+      const code = (error as { code?: string } | null)?.code || '';
+      if (
+        code === 'auth/popup-blocked' ||
+        code === 'auth/operation-not-supported-in-this-environment' ||
+        code === 'auth/cancelled-popup-request'
+      ) {
+        try {
+          await signInWithRedirect(auth, googleProvider);
+          return;
+        } catch (redirectError) {
+          setAuthError(getFirebaseAuthErrorMessage(redirectError));
+        }
+      } else {
+        setAuthError(getFirebaseAuthErrorMessage(error));
+      }
+    } finally {
+      isAuthActionInFlightRef.current = false;
+      hideLoader();
+      setAuthBusy(false);
+    }
+  };
+
+  const handleCustomerLogout = () => {
+    setStoredCurrentUser(null);
+    setCurrentUser(null);
+    setAuthError('');
+    setAuthPassword('');
+    signOut(auth).catch(() => {});
+    setSidebarOpen(false);
+    setPage('login');
   };
 
   const handlePlaceOrder = (e: React.FormEvent) => {
@@ -396,7 +572,7 @@ export default function App() {
     });
   };
 
-  const handleProfileSave = (e: React.FormEvent) => {
+  const handleProfileSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) return;
     showLoader('Saving profile...');
@@ -407,6 +583,9 @@ export default function App() {
       email: profEmail,
       address: profAddress,
     });
+    if (res.success && auth.currentUser && profName.trim()) {
+      await updateProfile(auth.currentUser, { displayName: profName.trim() }).catch(() => {});
+    }
     hideLoader();
     if (res.success && res.user) {
       loadBootstrap();
@@ -415,10 +594,29 @@ export default function App() {
     showModal({ title: res.success ? 'Saved' : 'Error', message: res.message, type: res.success ? 'success' : 'error' });
   };
 
-  const handlePasswordChange = (e: React.FormEvent) => {
+  const handlePasswordChange = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) return;
     showLoader('Updating password...');
+
+    const fbUser = auth.currentUser;
+    const usesPasswordProvider = fbUser?.providerData?.some((p) => p.providerId === 'password');
+    if (fbUser && fbUser.email && usesPasswordProvider) {
+      try {
+        const credential = EmailAuthProvider.credential(fbUser.email, currPass);
+        await reauthenticateWithCredential(fbUser, credential);
+        await updatePassword(fbUser, newPass);
+        hideLoader();
+        setCurrPass('');
+        setNewPass('');
+        showModal({ title: 'Updated', message: 'Password updated successfully.', type: 'success' });
+      } catch (err) {
+        hideLoader();
+        showModal({ title: 'Error', message: getFirebaseAuthErrorMessage(err), type: 'error' });
+      }
+      return;
+    }
+
     const res = changePasswordLocal(currentUser.id, currPass, newPass);
     hideLoader();
     if (res.success) {
@@ -752,10 +950,22 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setPage(currentUser ? 'profile' : 'login')}
-                  className="inline-flex items-center gap-1.5 h-9 px-2.5 sm:px-4 rounded-md bg-white text-[#2874F0] text-xs font-bold hover:bg-blue-50 transition whitespace-nowrap"
+                  className="inline-flex items-center gap-2 min-h-[36px] px-2.5 sm:px-3.5 py-1 rounded-md bg-white text-[#2874F0] text-xs font-bold hover:bg-blue-50 transition max-w-[175px] sm:max-w-[260px]"
                 >
-                  <i className="fa-solid fa-user text-[11px]"></i>
-                  <span>{currentUser ? currentUser.name.split(' ')[0] : 'Login'}</span>
+                  <i className="fa-solid fa-user text-[11px] shrink-0"></i>
+                  {currentUser ? (
+                    <div className="text-left min-w-0 leading-tight">
+                      <span className="block truncate font-extrabold text-[11px] sm:text-xs">
+                        {currentUser.name}
+                      </span>
+                      <span className="hidden sm:block truncate text-[10px] font-medium text-slate-600">
+                        {currentUser.email}
+                        {currentUser.phone ? ` · +91 ${currentUser.phone}` : ''}
+                      </span>
+                    </div>
+                  ) : (
+                    <span className="whitespace-nowrap">Login</span>
+                  )}
                 </button>
 
                 <button
@@ -821,7 +1031,12 @@ export default function App() {
               {currentUser ? (
                 <>
                   <p className="text-sm font-bold text-slate-900 truncate">{currentUser.name}</p>
-                  <p className="text-xs text-slate-500 truncate mt-0.5">{currentUser.email || currentUser.phone}</p>
+                  {currentUser.email && (
+                    <p className="text-xs text-slate-600 truncate mt-0.5">{currentUser.email}</p>
+                  )}
+                  {currentUser.phone && (
+                    <p className="text-xs text-slate-500 truncate mt-0.5">+91 {currentUser.phone}</p>
+                  )}
                 </>
               ) : (
                 <>
@@ -866,7 +1081,9 @@ export default function App() {
                 </button>
               ))}
 
-              {(currentUser?.email?.trim().toLowerCase() === 'sabreensheikh545@gmail.com' || adminUnlockedByTap) && (
+              {(currentUser?.email?.trim().toLowerCase() === 'sabreensheikh545@gmail.com' ||
+                auth.currentUser?.email?.trim().toLowerCase() === 'sabreensheikh545@gmail.com' ||
+                adminUnlockedByTap) && (
                 <div className="pt-3 mt-3 border-t border-slate-100">
                   <button
                     type="button"
@@ -887,12 +1104,7 @@ export default function App() {
               {currentUser ? (
                 <button
                   type="button"
-                  onClick={() => {
-                    setStoredCurrentUser(null);
-                    setCurrentUser(null);
-                    setSidebarOpen(false);
-                    setPage('login');
-                  }}
+                  onClick={handleCustomerLogout}
                   className="w-full py-2.5 px-4 rounded-lg bg-slate-100 text-slate-800 text-sm font-semibold flex items-center justify-center gap-2 hover:bg-slate-200"
                 >
                   <i className="fa-solid fa-right-from-bracket"></i>
@@ -1464,17 +1676,24 @@ export default function App() {
           {/* PROFILE PAGE */}
           {page === 'profile' && currentUser && (
             <main className="max-w-2xl mx-auto px-3 sm:px-4 py-5 space-y-4">
-              <div className="bg-white rounded-xl border border-slate-200 p-5 flex items-center justify-between gap-4">
+              <div className="bg-white rounded-xl border border-slate-200 p-5 flex flex-wrap items-center justify-between gap-4">
                 <div className="flex items-center gap-4 min-w-0">
                   <div className="w-14 h-14 rounded-full bg-[#2874F0] text-white flex items-center justify-center text-xl font-extrabold shrink-0">
                     {currentUser.name.charAt(0).toUpperCase()}
                   </div>
-                  <div className="min-w-0">
+                  <div className="min-w-0 space-y-0.5">
                     <h1 className="text-lg font-extrabold text-slate-900 truncate">{currentUser.name}</h1>
-                    <p className="text-xs text-slate-500 truncate">{currentUser.email || currentUser.phone}</p>
+                    <p className="text-xs text-slate-600 truncate flex items-center gap-1.5">
+                      <i className="fa-solid fa-envelope text-[#2874F0] w-3.5 text-center shrink-0"></i>
+                      <span className="truncate">{currentUser.email || 'No email added'}</span>
+                    </p>
+                    <p className="text-xs text-slate-600 truncate flex items-center gap-1.5">
+                      <i className="fa-solid fa-phone text-[#388E3C] w-3.5 text-center shrink-0"></i>
+                      <span>{currentUser.phone ? `+91 ${currentUser.phone}` : 'Mobile number not added'}</span>
+                    </p>
                   </div>
                 </div>
-                <button type="button" onClick={() => setPage('orders')} className="px-4 py-2 rounded-lg bg-blue-50 text-[#2874F0] text-xs font-bold">
+                <button type="button" onClick={() => setPage('orders')} className="px-4 py-2 rounded-lg bg-blue-50 text-[#2874F0] text-xs font-bold shrink-0">
                   My Orders
                 </button>
               </div>
@@ -1515,8 +1734,18 @@ export default function App() {
                 </button>
               </form>
 
-              <div className={`grid gap-3 ${currentUser.email?.trim().toLowerCase() === 'sabreensheikh545@gmail.com' || adminUnlockedByTap ? 'grid-cols-2' : 'grid-cols-1'}`}>
-                {(currentUser.email?.trim().toLowerCase() === 'sabreensheikh545@gmail.com' || adminUnlockedByTap) && (
+              <div
+                className={`grid gap-3 ${
+                  currentUser.email?.trim().toLowerCase() === 'sabreensheikh545@gmail.com' ||
+                  auth.currentUser?.email?.trim().toLowerCase() === 'sabreensheikh545@gmail.com' ||
+                  adminUnlockedByTap
+                    ? 'grid-cols-2'
+                    : 'grid-cols-1'
+                }`}
+              >
+                {(currentUser.email?.trim().toLowerCase() === 'sabreensheikh545@gmail.com' ||
+                  auth.currentUser?.email?.trim().toLowerCase() === 'sabreensheikh545@gmail.com' ||
+                  adminUnlockedByTap) && (
                   <button
                     type="button"
                     onClick={() => setMode('admin')}
@@ -1527,11 +1756,7 @@ export default function App() {
                 )}
                 <button
                   type="button"
-                  onClick={() => {
-                    setStoredCurrentUser(null);
-                    setCurrentUser(null);
-                    setPage('login');
-                  }}
+                  onClick={handleCustomerLogout}
                   className="h-11 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-sm font-bold flex items-center justify-center gap-2"
                 >
                   <i className="fa-solid fa-right-from-bracket"></i> Logout
@@ -1540,133 +1765,246 @@ export default function App() {
             </main>
           )}
 
-          {/* CUSTOMER LOGIN & SIGN UP PAGE */}
+          {/* CUSTOMER LOGIN & SIGN UP PAGE (Flipkart-style Email/Password & Google Auth) */}
           {page === 'login' && (
             <main className="max-w-md mx-auto px-3 sm:px-4 py-6">
               <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-                <div className="bg-[#2874F0] px-6 py-6 text-white">
-                  <div className="flex items-center justify-between">
+                <div className="bg-[#2874F0] px-6 py-5 text-white">
+                  <div className="flex items-center justify-between gap-3">
                     <div>
                       <h1 className="text-xl font-extrabold">
                         {authTab === 'login' ? 'Login' : 'Create Account'}
                       </h1>
-                      <p className="mt-1 text-xs text-blue-100">
-                        Get access to your Orders, Cart &amp; Big Saving Days
+                      <p className="mt-1 text-xs text-blue-100 leading-relaxed">
+                        {authTab === 'login'
+                          ? 'Get access to your Orders, Cart & Big Saving Days'
+                          : 'Sign up with your Name, Mobile Number & Email to start shopping'}
                       </p>
                     </div>
-                    <i className="fa-solid fa-bag-shopping text-3xl text-[#FFE500]"></i>
+                    <div className="w-12 h-12 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
+                      <i className={`fa-solid ${authTab === 'login' ? 'fa-right-to-bracket' : 'fa-user-plus'} text-xl text-[#FFE500]`}></i>
+                    </div>
                   </div>
-                  <div className="mt-4 grid grid-cols-2 p-1 bg-white/15 rounded-lg">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAuthTab('login');
-                        setAuthError('');
-                      }}
-                      className={`py-2 text-xs font-bold rounded-md transition ${
-                        authTab === 'login' ? 'bg-white text-[#2874F0] shadow-xs' : 'text-white'
-                      }`}
-                    >
-                      Login
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAuthTab('signup');
-                        setAuthError('');
-                      }}
-                      className={`py-2 text-xs font-bold rounded-md transition ${
-                        authTab === 'signup' ? 'bg-white text-[#2874F0] shadow-xs' : 'text-white'
-                      }`}
-                    >
-                      Sign Up
-                    </button>
-                  </div>
+                </div>
+
+                {/* Two Tabs: Login | New User? Create Account */}
+                <div className="grid grid-cols-2 border-b border-slate-200 bg-slate-50">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthTab('login');
+                      setAuthError('');
+                    }}
+                    className={`py-3.5 px-2 text-xs sm:text-sm font-bold border-b-2 transition ${
+                      authTab === 'login'
+                        ? 'bg-white text-[#2874F0] border-[#2874F0]'
+                        : 'text-slate-600 border-transparent hover:text-slate-900'
+                    }`}
+                  >
+                    Login
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAuthTab('signup');
+                      setAuthError('');
+                    }}
+                    className={`py-3.5 px-2 text-xs sm:text-sm font-bold border-b-2 transition ${
+                      authTab === 'signup'
+                        ? 'bg-white text-[#2874F0] border-[#2874F0]'
+                        : 'text-slate-600 border-transparent hover:text-slate-900'
+                    }`}
+                  >
+                    New User? Create Account
+                  </button>
                 </div>
 
                 <div className="p-6">
                   {authError && (
-                    <div className="mb-4 p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium flex items-center gap-2">
-                      <i className="fa-solid fa-circle-exclamation"></i>
+                    <div className="mb-4 p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium flex items-start gap-2">
+                      <i className="fa-solid fa-circle-exclamation mt-0.5 shrink-0"></i>
                       <span>{authError}</span>
                     </div>
                   )}
 
                   {authTab === 'login' ? (
-                    <form onSubmit={handleLogin} className="space-y-4">
+                    <form onSubmit={handleEmailLogin} className="space-y-4">
                       <div>
-                        <label className="block text-xs font-semibold text-slate-600 mb-1">Email or Phone Number</label>
+                        <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                          Email Address
+                        </label>
                         <input
-                          type="text"
-                          value={loginIdentifier}
-                          onChange={(e) => setLoginIdentifier(e.target.value)}
+                          type="email"
+                          value={authEmail}
+                          onChange={(e) => setAuthEmail(e.target.value)}
                           required
-                          placeholder="Enter email or phone number"
-                          className="w-full h-11 px-4 rounded-lg bg-slate-50 border border-slate-200 text-sm focus:bg-white focus:border-[#2874F0] focus:outline-none"
+                          autoComplete="email"
+                          placeholder="Enter your email"
+                          className="w-full h-11 px-3.5 rounded-lg bg-slate-50 border border-slate-300 text-sm font-medium text-slate-900 placeholder-slate-400 focus:bg-white focus:border-[#2874F0] focus:outline-none"
                         />
                       </div>
+
                       <div>
-                        <label className="block text-xs font-semibold text-slate-600 mb-1">Password</label>
-                        <input
-                          type="password"
-                          value={loginPassword}
-                          onChange={(e) => setLoginPassword(e.target.value)}
-                          required
-                          placeholder="Password"
-                          className="w-full h-11 px-4 rounded-lg bg-slate-50 border border-slate-200 text-sm focus:bg-white focus:border-[#2874F0] focus:outline-none"
-                        />
+                        <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                          Password
+                        </label>
+                        <div className="relative">
+                          <input
+                            type={showAuthPassword ? 'text' : 'password'}
+                            value={authPassword}
+                            onChange={(e) => setAuthPassword(e.target.value)}
+                            required
+                            autoComplete="current-password"
+                            placeholder="Enter your password"
+                            className="w-full h-11 pl-3.5 pr-11 rounded-lg bg-slate-50 border border-slate-300 text-sm font-medium text-slate-900 placeholder-slate-400 focus:bg-white focus:border-[#2874F0] focus:outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowAuthPassword((v) => !v)}
+                            aria-label={showAuthPassword ? 'Hide password' : 'Show password'}
+                            className="absolute right-0 top-0 h-11 w-11 flex items-center justify-center text-slate-400 hover:text-slate-700"
+                          >
+                            <i className={`fa-solid ${showAuthPassword ? 'fa-eye-slash' : 'fa-eye'} text-sm`}></i>
+                          </button>
+                        </div>
                       </div>
+
+                      <p className="text-[11px] text-slate-500 leading-relaxed">
+                        By continuing, you agree to Smart Basket&apos;s Terms of Use and Privacy Policy.
+                      </p>
+
                       <button
                         type="submit"
-                        className="w-full h-11 rounded-lg bg-[#FB641B] text-white text-sm font-bold hover:bg-[#e55812] transition"
+                        disabled={authBusy}
+                        className="w-full h-12 rounded-lg bg-[#FB641B] text-white text-sm font-bold hover:bg-[#e55812] disabled:opacity-60 disabled:cursor-not-allowed transition flex items-center justify-center gap-2"
                       >
-                        Login
+                        <span>{authBusy ? 'Signing in...' : 'Login'}</span>
+                        <i className="fa-solid fa-arrow-right text-xs"></i>
                       </button>
                     </form>
                   ) : (
-                    <form onSubmit={handleSignup} className="space-y-4">
+                    <form onSubmit={handleEmailSignup} className="space-y-4">
                       <div>
-                        <label className="block text-xs font-semibold text-slate-600 mb-1">Full Name</label>
+                        <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                          Full Name
+                        </label>
                         <input
                           type="text"
-                          value={signupName}
-                          onChange={(e) => setSignupName(e.target.value)}
+                          value={authName}
+                          onChange={(e) => setAuthName(e.target.value)}
                           required
-                          placeholder="Enter your name"
-                          className="w-full h-11 px-4 rounded-lg bg-slate-50 border border-slate-200 text-sm focus:bg-white focus:border-[#2874F0] focus:outline-none"
+                          autoComplete="name"
+                          placeholder="Enter your full name"
+                          className="w-full h-11 px-3.5 rounded-lg bg-slate-50 border border-slate-300 text-sm font-medium text-slate-900 placeholder-slate-400 focus:bg-white focus:border-[#2874F0] focus:outline-none"
                         />
                       </div>
+
                       <div>
-                        <label className="block text-xs font-semibold text-slate-600 mb-1">Email or Phone Number</label>
-                        <input
-                          type="text"
-                          value={signupContact}
-                          onChange={(e) => setSignupContact(e.target.value)}
-                          required
-                          placeholder="Email address or 10-digit phone"
-                          className="w-full h-11 px-4 rounded-lg bg-slate-50 border border-slate-200 text-sm focus:bg-white focus:border-[#2874F0] focus:outline-none"
-                        />
+                        <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                          Mobile Number
+                        </label>
+                        <div className="flex items-center rounded-lg border border-slate-300 bg-slate-50 focus-within:border-[#2874F0] focus-within:bg-white overflow-hidden transition">
+                          <span className="px-3 h-11 flex items-center justify-center bg-slate-100 border-r border-slate-200 text-xs font-bold text-slate-700 shrink-0">
+                            +91
+                          </span>
+                          <input
+                            type="tel"
+                            inputMode="numeric"
+                            maxLength={10}
+                            value={authPhone}
+                            onChange={(e) => setAuthPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                            required
+                            autoComplete="tel-national"
+                            placeholder="10-digit mobile number"
+                            className="w-full h-11 px-3.5 bg-transparent text-sm font-medium text-slate-900 placeholder-slate-400 focus:outline-none"
+                          />
+                        </div>
                       </div>
+
                       <div>
-                        <label className="block text-xs font-semibold text-slate-600 mb-1">Password</label>
+                        <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                          Email Address
+                        </label>
                         <input
-                          type="password"
-                          value={signupPassword}
-                          onChange={(e) => setSignupPassword(e.target.value)}
+                          type="email"
+                          value={authEmail}
+                          onChange={(e) => setAuthEmail(e.target.value)}
                           required
-                          minLength={6}
-                          placeholder="Min 6 characters"
-                          className="w-full h-11 px-4 rounded-lg bg-slate-50 border border-slate-200 text-sm focus:bg-white focus:border-[#2874F0] focus:outline-none"
+                          autoComplete="email"
+                          placeholder="Enter your email"
+                          className="w-full h-11 px-3.5 rounded-lg bg-slate-50 border border-slate-300 text-sm font-medium text-slate-900 placeholder-slate-400 focus:bg-white focus:border-[#2874F0] focus:outline-none"
                         />
                       </div>
+
+                      <div>
+                        <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                          Password
+                        </label>
+                        <div className="relative">
+                          <input
+                            type={showAuthPassword ? 'text' : 'password'}
+                            value={authPassword}
+                            onChange={(e) => setAuthPassword(e.target.value)}
+                            required
+                            minLength={6}
+                            autoComplete="new-password"
+                            placeholder="Minimum 6 characters"
+                            className="w-full h-11 pl-3.5 pr-11 rounded-lg bg-slate-50 border border-slate-300 text-sm font-medium text-slate-900 placeholder-slate-400 focus:bg-white focus:border-[#2874F0] focus:outline-none"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowAuthPassword((v) => !v)}
+                            aria-label={showAuthPassword ? 'Hide password' : 'Show password'}
+                            className="absolute right-0 top-0 h-11 w-11 flex items-center justify-center text-slate-400 hover:text-slate-700"
+                          >
+                            <i className={`fa-solid ${showAuthPassword ? 'fa-eye-slash' : 'fa-eye'} text-sm`}></i>
+                          </button>
+                        </div>
+                      </div>
+
                       <button
                         type="submit"
-                        className="w-full h-11 rounded-lg bg-[#FB641B] text-white text-sm font-bold hover:bg-[#e55812] transition"
+                        disabled={authBusy}
+                        className="w-full h-12 rounded-lg bg-[#FB641B] text-white text-sm font-bold hover:bg-[#e55812] disabled:opacity-60 disabled:cursor-not-allowed transition flex items-center justify-center gap-2"
                       >
-                        Create Account &amp; Login
+                        <span>{authBusy ? 'Creating Account...' : 'Create Account'}</span>
+                        <i className="fa-solid fa-user-check text-xs"></i>
                       </button>
                     </form>
                   )}
+
+                  <div className="my-5 flex items-center gap-3">
+                    <div className="flex-1 h-px bg-slate-200" />
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">OR</span>
+                    <div className="flex-1 h-px bg-slate-200" />
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={authBusy}
+                    onClick={handleGoogleSignIn}
+                    className="w-full h-11 rounded-lg bg-white border border-slate-300 hover:bg-slate-50 active:scale-[0.99] disabled:opacity-60 transition flex items-center justify-center gap-2.5 text-sm font-bold text-slate-800 shadow-2xs"
+                  >
+                    <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
+                      <path
+                        fill="#4285F4"
+                        d="M23.49 12.27c0-.79-.07-1.54-.19-2.27H12v4.51h6.47c-.29 1.48-1.14 2.73-2.4 3.58v3h3.86c2.26-2.09 3.56-5.17 3.56-8.82z"
+                      />
+                      <path
+                        fill="#34A853"
+                        d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.86-3c-1.08.72-2.45 1.16-4.07 1.16-3.13 0-5.78-2.11-6.73-4.96H1.29v3.09C3.26 21.3 7.31 24 12 24z"
+                      />
+                      <path
+                        fill="#FBBC05"
+                        d="M5.27 14.29c-.25-.72-.38-1.49-.38-2.29s.14-1.57.38-2.29V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.98-3.09z"
+                      />
+                      <path
+                        fill="#EA4335"
+                        d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.98 3.09c.95-2.85 3.6-4.96 6.73-4.96z"
+                      />
+                    </svg>
+                    <span>Continue with Google</span>
+                  </button>
                 </div>
               </div>
             </main>
@@ -1787,6 +2125,7 @@ export default function App() {
           </div>
         </div>
       )}
+
     </div>
   );
 }

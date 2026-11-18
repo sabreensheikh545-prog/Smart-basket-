@@ -385,6 +385,56 @@ export function loginUserLocal(identifier: string, password: string): { success:
   return { success: true, message: 'Signed in successfully.', user: safeUser };
 }
 
+export function syncFirebaseCustomerLocal(payload: {
+  name?: string;
+  email: string;
+  phone?: string;
+}): { success: boolean; message: string; user?: User } {
+  ensureSeeded();
+  const cleanEmail = payload.email.trim().toLowerCase();
+  if (!cleanEmail) {
+    return { success: false, message: 'Valid email address is required.' };
+  }
+  const cleanName = payload.name?.trim() || '';
+  const cleanPhone = payload.phone ? payload.phone.replace(/\D/g, '').slice(-10) : '';
+
+  const users = readJSON<StoredUser[]>(KEYS.users, DEFAULT_USERS);
+  const existingIdx = users.findIndex((u) => u.email && u.email.toLowerCase() === cleanEmail);
+
+  if (existingIdx !== -1) {
+    const found = users[existingIdx];
+    if (found.status === 'blocked') {
+      return { success: false, message: 'Your account has been suspended.' };
+    }
+    const updatedUser: StoredUser = {
+      ...found,
+      name: cleanName && (!found.name || found.name === 'Smart Basket Customer') ? cleanName : found.name || cleanName || cleanEmail.split('@')[0],
+      phone: cleanPhone || found.phone || '',
+    };
+    users[existingIdx] = updatedUser;
+    writeJSON(KEYS.users, users);
+    const { password: _p, ...safeUser } = updatedUser;
+    setStoredCurrentUser(safeUser);
+    return { success: true, message: 'Signed in successfully.', user: safeUser };
+  }
+
+  const nextId = users.reduce((max, u) => Math.max(max, u.id), 0) + 1;
+  const newUser: StoredUser = {
+    id: nextId,
+    name: cleanName || cleanEmail.split('@')[0] || 'Customer',
+    phone: cleanPhone,
+    email: cleanEmail,
+    password: '',
+    address: '',
+    status: 'active',
+    created_at: new Date().toISOString(),
+  };
+  writeJSON(KEYS.users, [newUser, ...users]);
+  const { password: _p, ...safeUser } = newUser;
+  setStoredCurrentUser(safeUser);
+  return { success: true, message: 'Welcome to Smart Basket!', user: safeUser };
+}
+
 export function signupUserLocal(payload: {
   name: string;
   contact: string;
