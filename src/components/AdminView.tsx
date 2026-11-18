@@ -1,22 +1,78 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import {
+  deleteCategoryFirestore,
+  deleteProductFirestore,
+  deleteUserFirestore,
+  saveCategoryFirestore,
+  saveProductFirestore,
+  subscribeAllOrdersFirestore,
+  subscribeAllUsersFirestore,
+  toggleUserBlockFirestore,
+  updateOrderStatusFirestore,
+} from '../services/firestoreService';
 import {
   ASSETS,
   IMAGE_CHOICES,
-  deleteCategoryLocal,
-  deleteProductLocal,
-  deleteUserLocal,
   getBootstrapData,
   loginAdminLocal,
-  saveCategoryLocal,
-  saveProductLocal,
   setStoredAdminLoggedIn,
-  toggleUserBlockLocal,
   updateAdminSettingsLocal,
-  updateOrderStatusLocal,
 } from '../store/localStore';
 import { Category, Order, Product, User, formatINR, getEffectiveMrp } from '../types';
 
 type AdminTab = 'dashboard' | 'categories' | 'products' | 'orders' | 'order_detail' | 'users' | 'settings';
+
+function compressImageFileToDataUrl(file: File, maxDimension = 500, quality = 0.7): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (!file.type.startsWith('image/')) {
+      reject(new Error('Please select a valid image file.'));
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+
+    img.onload = () => {
+      try {
+        const srcW = img.naturalWidth || img.width || maxDimension;
+        const srcH = img.naturalHeight || img.height || maxDimension;
+        const scale = Math.min(1, maxDimension / Math.max(srcW, srcH));
+        const targetW = Math.max(1, Math.round(srcW * scale));
+        const targetH = Math.max(1, Math.round(srcH * scale));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('Unable to process image in this browser.'));
+          return;
+        }
+
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, targetW, targetH);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, targetW, targetH);
+
+        const dataUrl = canvas.toDataURL('image/jpeg', quality);
+        resolve(dataUrl);
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error('Failed to compress image.'));
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('Could not read the selected image file.'));
+    };
+
+    img.src = objectUrl;
+  });
+}
 
 interface Props {
   categories: Category[];
@@ -47,6 +103,8 @@ export const AdminView: React.FC<Props> = ({
   const [adminTab, setAdminTab] = useState<AdminTab>('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
+  const [liveOrders, setLiveOrders] = useState<Order[]>(orders);
+  const [liveUsers, setLiveUsers] = useState<User[]>(users);
 
   // Admin Login Form
   const [loginUser, setLoginUser] = useState('Seraj');
@@ -69,6 +127,8 @@ export const AdminView: React.FC<Props> = ({
   const [prodMrp, setProdMrp] = useState('');
   const [prodStock, setProdStock] = useState('20');
   const [prodImage, setProdImage] = useState(ASSETS.smartphone);
+  const [imageCompressing, setImageCompressing] = useState(false);
+  const [imageUploadError, setImageUploadError] = useState('');
 
   // Order Detail Status
   const [orderStatusDraft, setOrderStatusDraft] = useState<Order['status']>('Placed');
@@ -76,6 +136,22 @@ export const AdminView: React.FC<Props> = ({
   // Admin Settings
   const [settingsUser, setSettingsUser] = useState(adminUsername);
   const [settingsPass, setSettingsPass] = useState('');
+
+  useEffect(() => {
+    if (!isAdminLoggedIn) return;
+    const unsubOrders = subscribeAllOrdersFirestore(
+      (list) => setLiveOrders(list),
+      (errMsg) => showModal({ title: 'Orders Sync Notice', message: errMsg, type: 'error' })
+    );
+    const unsubUsers = subscribeAllUsersFirestore(
+      (list) => setLiveUsers(list),
+      (errMsg) => showModal({ title: 'Users Sync Notice', message: errMsg, type: 'error' })
+    );
+    return () => {
+      unsubOrders();
+      unsubUsers();
+    };
+  }, [isAdminLoggedIn, showModal]);
 
   const handleAdminLogin = (e: React.FormEvent) => {
     e.preventDefault();
@@ -152,11 +228,11 @@ export const AdminView: React.FC<Props> = ({
     );
   }
 
-  const revenue = orders.filter((o) => o.status !== 'Cancelled').reduce((acc, o) => acc + o.total_amount, 0);
+  const revenue = liveOrders.filter((o) => o.status !== 'Cancelled').reduce((acc, o) => acc + o.total_amount, 0);
   const activeProducts = products.filter((p) => p.stock > 0).length;
-  const cancellations = orders.filter((o) => o.status === 'Cancelled').length;
-  const shipments = orders.filter((o) => o.status === 'Dispatched' || o.status === 'Delivered').length;
-  const activeOrder = orders.find((o) => o.id === selectedOrderId) || null;
+  const cancellations = liveOrders.filter((o) => o.status === 'Cancelled').length;
+  const shipments = liveOrders.filter((o) => o.status === 'Dispatched' || o.status === 'Delivered').length;
+  const activeOrder = liveOrders.find((o) => o.id === selectedOrderId) || null;
 
   const openCategoryModal = (cat?: Category) => {
     setEditingCat(cat || null);
@@ -165,10 +241,15 @@ export const AdminView: React.FC<Props> = ({
     setCatModalOpen(true);
   };
 
-  const saveCategory = (e: React.FormEvent) => {
+  const saveCategory = async (e: React.FormEvent) => {
     e.preventDefault();
     showLoader('Saving category...');
-    const res = saveCategoryLocal({ id: editingCat?.id || 0, name: catName, image: catImage });
+    const res = await saveCategoryFirestore({
+      id: editingCat?.id || 0,
+      docId: editingCat?.docId,
+      name: catName,
+      image: catImage,
+    });
     hideLoader();
     if (res.success) {
       setCatModalOpen(false);
@@ -178,17 +259,21 @@ export const AdminView: React.FC<Props> = ({
     }
   };
 
-  const deleteCategory = (id: number) => {
+  const deleteCategory = (cat: Category) => {
     showModal({
       title: 'Delete Category',
       message: 'Deleting a category also removes its linked products. Continue?',
       type: 'error',
       confirmText: 'Delete',
-      onConfirm: () => {
+      onConfirm: async () => {
         showLoader('Deleting...');
-        deleteCategoryLocal(id);
+        const res = await deleteCategoryFirestore(cat, products);
         hideLoader();
-        onRefresh();
+        if (!res.success) {
+          showModal({ title: 'Error', message: res.message, type: 'error' });
+        } else {
+          onRefresh();
+        }
       },
     });
   };
@@ -202,76 +287,116 @@ export const AdminView: React.FC<Props> = ({
     setProdMrp(prod ? String(getEffectiveMrp(prod.price, prod.mrp)) : '');
     setProdStock(prod ? String(prod.stock) : '20');
     setProdImage(prod ? prod.image : ASSETS.smartphone);
+    setImageCompressing(false);
+    setImageUploadError('');
     setProdModalOpen(true);
   };
 
-  const saveProduct = (e: React.FormEvent) => {
+  const handleProductPhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    setImageUploadError('');
+    setImageCompressing(true);
+    try {
+      const compressedDataUrl = await compressImageFileToDataUrl(file, 500, 0.7);
+      setProdImage(compressedDataUrl);
+    } catch (err) {
+      setImageUploadError(err instanceof Error ? err.message : 'Unable to process selected photo.');
+    } finally {
+      setImageCompressing(false);
+    }
+  };
+
+  const saveProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     showLoader('Saving product...');
     const priceNum = Number(prodPrice);
     const mrpNum = Number(prodMrp);
-    const res = saveProductLocal({
+    const res = await saveProductFirestore({
       id: editingProd?.id || 0,
+      docId: editingProd?.docId,
       cat_id: prodCatId,
       name: prodName,
       description: prodDesc,
       price: priceNum,
       mrp: mrpNum > priceNum ? mrpNum : undefined,
+      rating: editingProd?.rating,
+      reviews: editingProd?.reviews,
       stock: Number(prodStock),
       image: prodImage,
+      created_at: editingProd?.created_at,
     });
     hideLoader();
     if (res.success) {
       setProdModalOpen(false);
       onRefresh();
+      showModal({ title: 'Saved', message: res.message, type: 'success' });
     } else {
       showModal({ title: 'Validation Error', message: res.message, type: 'error' });
     }
   };
 
-  const deleteProduct = (id: number) => {
+  const deleteProduct = (prod: Product) => {
     showModal({
       title: 'Delete Product',
-      message: 'Remove this product from your catalog?',
+      message: 'Remove this product from your live catalog?',
       type: 'error',
       confirmText: 'Delete',
-      onConfirm: () => {
+      onConfirm: async () => {
         showLoader('Deleting...');
-        deleteProductLocal(id);
+        const res = await deleteProductFirestore(prod);
         hideLoader();
-        onRefresh();
+        if (!res.success) {
+          showModal({ title: 'Error', message: res.message, type: 'error' });
+        } else {
+          onRefresh();
+        }
       },
     });
   };
 
-  const updateOrderStatus = (e: React.FormEvent) => {
+  const updateOrderStatus = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeOrder) return;
     showLoader('Updating status...');
-    const res = updateOrderStatusLocal(activeOrder.id, orderStatusDraft);
+    const res = await updateOrderStatusFirestore(activeOrder, orderStatusDraft);
     hideLoader();
-    onRefresh();
-    showModal({ title: 'Status Updated', message: res.message, type: 'success' });
+    if (res.success) {
+      onRefresh();
+      showModal({ title: 'Status Updated', message: res.message, type: 'success' });
+    } else {
+      showModal({ title: 'Error', message: res.message, type: 'error' });
+    }
   };
 
-  const toggleUserBlock = (user: User) => {
+  const toggleUserBlock = async (user: User) => {
     showLoader('Updating user...');
-    toggleUserBlockLocal(user.id, user.status === 'blocked' ? 'active' : 'blocked');
+    const res = await toggleUserBlockFirestore(user, user.status === 'blocked' ? 'active' : 'blocked');
     hideLoader();
-    onRefresh();
+    if (!res.success) {
+      showModal({ title: 'Error', message: res.message, type: 'error' });
+    } else {
+      onRefresh();
+    }
   };
 
-  const deleteUser = (id: number) => {
+  const deleteUser = (user: User) => {
     showModal({
       title: 'Delete User',
-      message: 'Are you sure you want to remove this user account?',
+      message: 'Are you sure you want to remove this user account from Firestore?',
       type: 'error',
       confirmText: 'Delete',
-      onConfirm: () => {
+      onConfirm: async () => {
         showLoader('Deleting...');
-        deleteUserLocal(id);
+        const res = await deleteUserFirestore(user);
         hideLoader();
-        onRefresh();
+        if (!res.success) {
+          showModal({ title: 'Error', message: res.message, type: 'error' });
+        } else {
+          onRefresh();
+        }
       },
     });
   };
@@ -445,13 +570,13 @@ export const AdminView: React.FC<Props> = ({
 
             <div>
               <h1 className="text-lg font-extrabold text-slate-900">Dashboard Overview</h1>
-              <p className="text-xs text-slate-500">Live store catalog, orders &amp; revenue in offline storage</p>
+              <p className="text-xs text-slate-500">Real-time store catalog, orders &amp; customers synced with Firestore</p>
             </div>
 
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3.5 sm:gap-5">
               {[
-                { label: 'Total Users', value: users.length, icon: 'fa-users', color: 'bg-blue-50 text-[#2874F0]' },
-                { label: 'Orders', value: orders.length, icon: 'fa-bag-shopping', color: 'bg-amber-50 text-amber-600' },
+                { label: 'Total Users', value: liveUsers.length, icon: 'fa-users', color: 'bg-blue-50 text-[#2874F0]' },
+                { label: 'Orders', value: liveOrders.length, icon: 'fa-bag-shopping', color: 'bg-amber-50 text-amber-600' },
                 { label: 'Revenue', value: formatINR(revenue), icon: 'fa-indian-rupee-sign', color: 'bg-emerald-50 text-[#388E3C]' },
                 { label: 'Active Products', value: activeProducts, icon: 'fa-boxes-stacked', color: 'bg-indigo-50 text-indigo-600' },
                 { label: 'Cancellations', value: cancellations, icon: 'fa-circle-xmark', color: 'bg-rose-50 text-rose-600' },
@@ -515,7 +640,7 @@ export const AdminView: React.FC<Props> = ({
                     <button type="button" onClick={() => openCategoryModal(cat)} className="w-10 h-10 rounded-lg bg-slate-100 text-slate-700 hover:bg-slate-200 flex items-center justify-center">
                       <i className="fa-solid fa-pen text-xs"></i>
                     </button>
-                    <button type="button" onClick={() => deleteCategory(cat.id)} className="w-10 h-10 rounded-lg bg-rose-50 text-rose-600 hover:bg-rose-100 flex items-center justify-center">
+                    <button type="button" onClick={() => deleteCategory(cat)} className="w-10 h-10 rounded-lg bg-rose-50 text-rose-600 hover:bg-rose-100 flex items-center justify-center">
                       <i className="fa-solid fa-trash text-xs"></i>
                     </button>
                   </div>
@@ -549,7 +674,7 @@ export const AdminView: React.FC<Props> = ({
                       <button type="button" onClick={() => openProductModal(prod)} className="px-3 py-1.5 rounded-lg bg-blue-50 text-[#2874F0] text-xs font-bold hover:bg-blue-100">
                         <i className="fa-solid fa-pen mr-1"></i>Edit
                       </button>
-                      <button type="button" onClick={() => deleteProduct(prod.id)} className="px-3 py-1.5 rounded-lg bg-rose-50 text-rose-600 text-xs font-bold hover:bg-rose-100">
+                      <button type="button" onClick={() => deleteProduct(prod)} className="px-3 py-1.5 rounded-lg bg-rose-50 text-rose-600 text-xs font-bold hover:bg-rose-100">
                         <i className="fa-solid fa-trash mr-1"></i>Delete
                       </button>
                     </div>
@@ -576,23 +701,31 @@ export const AdminView: React.FC<Props> = ({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-sm">
-                    {orders.map((ord) => (
-                      <tr
-                        key={ord.id}
-                        onClick={() => {
-                          setSelectedOrderId(ord.id);
-                          setOrderStatusDraft(ord.status);
-                          setAdminTab('order_detail');
-                        }}
-                        className="hover:bg-slate-50 cursor-pointer transition"
-                      >
-                        <td className="py-3.5 px-4 font-mono font-bold text-slate-900 tabular-nums">#{ord.id}</td>
-                        <td className="py-3.5 px-4 font-semibold text-slate-800">{ord.name}</td>
-                        <td className="py-3.5 px-4 font-mono font-bold text-slate-900 tabular-nums">{formatINR(ord.total_amount)}</td>
-                        <td className="py-3.5 px-4 text-xs font-semibold text-[#2874F0]">{ord.status}</td>
-                        <td className="py-3.5 px-4 text-xs text-slate-500">{new Date(ord.created_at).toLocaleDateString('en-IN')}</td>
+                    {liveOrders.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="py-8 text-center text-xs text-slate-500">
+                          No orders placed yet.
+                        </td>
                       </tr>
-                    ))}
+                    ) : (
+                      liveOrders.map((ord) => (
+                        <tr
+                          key={ord.docId || ord.id}
+                          onClick={() => {
+                            setSelectedOrderId(ord.id);
+                            setOrderStatusDraft(ord.status);
+                            setAdminTab('order_detail');
+                          }}
+                          className="hover:bg-slate-50 cursor-pointer transition"
+                        >
+                          <td className="py-3.5 px-4 font-mono font-bold text-slate-900 tabular-nums">#{ord.id}</td>
+                          <td className="py-3.5 px-4 font-semibold text-slate-800">{ord.name}</td>
+                          <td className="py-3.5 px-4 font-mono font-bold text-slate-900 tabular-nums">{formatINR(ord.total_amount)}</td>
+                          <td className="py-3.5 px-4 text-xs font-semibold text-[#2874F0]">{ord.status}</td>
+                          <td className="py-3.5 px-4 text-xs text-slate-500">{new Date(ord.created_at).toLocaleDateString('en-IN')}</td>
+                        </tr>
+                      ))
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -616,7 +749,11 @@ export const AdminView: React.FC<Props> = ({
                 <h2 className="text-xs font-bold text-slate-500 uppercase">Customer &amp; Delivery</h2>
                 <p className="text-sm font-bold text-slate-900">{activeOrder.name}</p>
                 <p className="text-xs text-slate-600"><i className="fa-solid fa-phone mr-1.5"></i>{activeOrder.phone}</p>
+                {activeOrder.email && (
+                  <p className="text-xs text-slate-600"><i className="fa-solid fa-envelope mr-1.5"></i>{activeOrder.email}</p>
+                )}
                 <p className="text-xs text-slate-600"><i className="fa-solid fa-location-dot mr-1.5"></i>{activeOrder.address}</p>
+                <p className="text-xs text-slate-600"><i className="fa-solid fa-wallet mr-1.5"></i>{activeOrder.paymentMethod || 'Cash on Delivery'}</p>
               </div>
               <form onSubmit={updateOrderStatus} className="bg-white rounded-xl border border-slate-200/80 p-5 space-y-3">
                 <h2 className="text-xs font-bold text-slate-500 uppercase">Update Status</h2>
@@ -660,32 +797,38 @@ export const AdminView: React.FC<Props> = ({
 
         {adminTab === 'users' && (
           <div className="space-y-4">
-            <h1 className="text-xl font-extrabold text-slate-900">Registered Users</h1>
-            {users.map((u) => (
-              <div key={u.id} className="bg-white rounded-xl border border-slate-200/80 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-bold text-slate-900">{u.name}</h3>
-                    <span className={`text-[11px] font-semibold ${u.status === 'blocked' ? 'text-rose-600' : 'text-[#388E3C]'}`}>
-                      · {u.status === 'blocked' ? 'Blocked' : 'Active'}
-                    </span>
-                  </div>
-                  <p className="text-xs text-slate-500">{u.email || 'No email'} · {u.phone || 'No phone'}</p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => toggleUserBlock(u)}
-                    className={`px-3.5 py-2 rounded-lg text-xs font-semibold ${u.status === 'blocked' ? 'bg-emerald-50 text-[#388E3C]' : 'bg-amber-50 text-amber-700'}`}
-                  >
-                    {u.status === 'blocked' ? 'Unblock' : 'Block'}
-                  </button>
-                  <button type="button" onClick={() => deleteUser(u.id)} className="px-3.5 py-2 rounded-lg bg-rose-50 text-rose-600 text-xs font-semibold">
-                    Delete
-                  </button>
-                </div>
+            <h1 className="text-xl font-extrabold text-slate-900">Registered Users ({liveUsers.length})</h1>
+            {liveUsers.length === 0 ? (
+              <div className="bg-white rounded-xl border border-slate-200/80 p-8 text-center text-xs text-slate-500">
+                No registered customers in Firestore yet.
               </div>
-            ))}
+            ) : (
+              liveUsers.map((u) => (
+                <div key={u.docId || u.uid || u.id} className="bg-white rounded-xl border border-slate-200/80 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-sm font-bold text-slate-900">{u.name}</h3>
+                      <span className={`text-[11px] font-semibold ${u.status === 'blocked' ? 'text-rose-600' : 'text-[#388E3C]'}`}>
+                        · {u.status === 'blocked' ? 'Blocked' : 'Active'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500">{u.email || 'No email'} · {u.phone || 'No phone'}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => toggleUserBlock(u)}
+                      className={`px-3.5 py-2 rounded-lg text-xs font-semibold ${u.status === 'blocked' ? 'bg-emerald-50 text-[#388E3C]' : 'bg-amber-50 text-amber-700'}`}
+                    >
+                      {u.status === 'blocked' ? 'Unblock' : 'Block'}
+                    </button>
+                    <button type="button" onClick={() => deleteUser(u)} className="px-3.5 py-2 rounded-lg bg-rose-50 text-rose-600 text-xs font-semibold">
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         )}
 
@@ -814,13 +957,88 @@ export const AdminView: React.FC<Props> = ({
                 <label className="block text-xs font-semibold text-slate-700 mb-1">Description</label>
                 <textarea rows={3} value={prodDesc} onChange={(e) => setProdDesc(e.target.value)} required className="w-full p-3 rounded-xl bg-slate-50 border border-slate-200 text-sm" />
               </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Product Photo</label>
-                <select value={prodImage} onChange={(e) => setProdImage(e.target.value)} className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-sm">
-                  {imageChoices.map((ic) => <option key={ic.url} value={ic.url}>{ic.label}</option>)}
-                </select>
+              <div className="space-y-2.5">
+                <label className="block text-xs font-semibold text-slate-700">Product Photo</label>
+
+                <div className="flex items-center gap-3 p-3 rounded-xl bg-slate-50 border border-slate-200">
+                  <div className="w-16 h-16 rounded-xl bg-white border border-slate-200 overflow-hidden shrink-0 flex items-center justify-center">
+                    <img
+                      src={prodImage || ASSETS.smartphone}
+                      alt="Product preview"
+                      referrerPolicy="no-referrer"
+                      className="w-full h-full object-cover"
+                    />
+                  </div>
+                  <div className="flex-1 min-w-0 space-y-1.5">
+                    <label className="inline-flex items-center justify-center gap-2 px-3.5 py-2 rounded-lg bg-[#2874F0] text-white text-xs font-bold hover:bg-[#1e60d5] active:scale-[0.99] transition cursor-pointer">
+                      <i className={`fa-solid ${imageCompressing ? 'fa-spinner fa-spin' : 'fa-camera'}`}></i>
+                      <span>{imageCompressing ? 'Compressing photo...' : 'Upload from Gallery'}</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={handleProductPhotoUpload}
+                        disabled={imageCompressing}
+                        className="sr-only"
+                      />
+                    </label>
+                    <p className="text-[11px] text-slate-500">
+                      {prodImage.startsWith('data:image/')
+                        ? 'Gallery photo compressed (max 500×500 JPEG) & ready for Firestore.'
+                        : 'Auto-resized & compressed (max 500×500px) for fast Firestore sync.'}
+                    </p>
+                  </div>
+                </div>
+
+                {imageUploadError && (
+                  <p className="text-xs font-medium text-rose-600 flex items-center gap-1.5">
+                    <i className="fa-solid fa-circle-exclamation"></i>
+                    <span>{imageUploadError}</span>
+                  </p>
+                )}
+
+                <div className="grid sm:grid-cols-2 gap-2">
+                  <select
+                    value={imageChoices.some((ic) => ic.url === prodImage) ? prodImage : ''}
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setImageUploadError('');
+                        setProdImage(e.target.value);
+                      }
+                    }}
+                    className="w-full h-9 px-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-700"
+                  >
+                    <option value="">
+                      {prodImage.startsWith('data:image/') ? 'Uploaded Gallery Photo' : 'Custom Image URL'}
+                    </option>
+                    {imageChoices.map((ic) => (
+                      <option key={ic.url} value={ic.url}>
+                        {ic.label}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="text"
+                    value={prodImage.startsWith('data:image/') ? '' : prodImage}
+                    onChange={(e) => {
+                      setImageUploadError('');
+                      setProdImage(e.target.value);
+                    }}
+                    placeholder={
+                      prodImage.startsWith('data:image/')
+                        ? 'Or paste https://... URL to replace'
+                        : 'Or paste https://... image URL'
+                    }
+                    className="w-full h-9 px-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-700"
+                  />
+                </div>
               </div>
-              <button type="submit" className="w-full h-11 rounded-xl bg-[#FB641B] text-white text-sm font-bold hover:bg-[#e55812] transition">Save Product</button>
+              <button
+                type="submit"
+                disabled={imageCompressing}
+                className="w-full h-11 rounded-xl bg-[#FB641B] text-white text-sm font-bold hover:bg-[#e55812] disabled:opacity-60 transition"
+              >
+                {imageCompressing ? 'Processing Photo...' : 'Save Product'}
+              </button>
             </form>
           </div>
         </div>

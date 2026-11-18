@@ -62,7 +62,28 @@ const KEYS = {
   adminLoggedIn: 'qk_admin_logged_in_v3',
 };
 
-const DEFAULT_CATEGORIES: Category[] = [
+export function resolveAssetImage(imageValue?: string): string {
+  const val = (imageValue || '').trim();
+  if (!val) return smartphoneImg;
+  const knownAssets = [
+    { key: 'product_smartphone_5g_1794941059550', url: smartphoneImg },
+    { key: 'product_fashion_denim_1794941061353', url: fashionImg },
+    { key: 'product_earbuds_1794891797883', url: earbudsImg },
+    { key: 'product_smartwatch_1794891795980', url: smartwatchImg },
+    { key: 'product_sneakers_1794891798636', url: sneakersImg },
+    { key: 'product_backpack_1794891798552', url: backpackImg },
+    { key: 'product_flask_1794891799263', url: flaskImg },
+    { key: 'product_home_appliance_1794941059747', url: homeApplianceImg },
+    { key: 'product_beauty_skincare_1794941060127', url: beautyImg },
+    { key: 'product_grocery_pack_1794941061136', url: groceryImg },
+    { key: 'hero_quick_kart_1794891801002', url: heroImg },
+    { key: 'banner_big_saving_1794941061121', url: bigSavingBannerImg },
+  ];
+  const matched = knownAssets.find((item) => val.includes(item.key));
+  return matched ? matched.url : val;
+}
+
+export const DEFAULT_CATEGORIES: Category[] = [
   { id: 1, name: 'Mobiles', image: smartphoneImg },
   { id: 2, name: 'Fashion', image: fashionImg },
   { id: 3, name: 'Electronics', image: earbudsImg },
@@ -71,7 +92,7 @@ const DEFAULT_CATEGORIES: Category[] = [
   { id: 6, name: 'Grocery', image: groceryImg },
 ];
 
-const DEFAULT_PRODUCTS: Product[] = [
+export const DEFAULT_PRODUCTS: Product[] = [
   {
     id: 1,
     cat_id: 1,
@@ -356,6 +377,27 @@ export function saveCart(cart: CartEntry[]): void {
   writeJSON(KEYS.cart, cart);
 }
 
+export function cacheCategoriesLocal(categories: Category[]): void {
+  writeJSON(KEYS.categories, categories);
+}
+
+export function cacheProductsLocal(products: Product[]): void {
+  writeJSON(KEYS.products, products);
+}
+
+export function cacheOrdersLocal(orders: Order[]): void {
+  writeJSON(KEYS.orders, orders);
+}
+
+export function cacheUsersLocal(users: User[]): void {
+  const existing = readJSON<StoredUser[]>(KEYS.users, DEFAULT_USERS);
+  const mapped: StoredUser[] = users.map((u) => {
+    const prev = existing.find((e) => (u.uid && e.uid === u.uid) || e.email.toLowerCase() === u.email.toLowerCase());
+    return { ...u, password: prev?.password || '' };
+  });
+  writeJSON(KEYS.users, mapped);
+}
+
 export function setStoredCurrentUser(user: User | null): void {
   writeJSON(KEYS.currentUser, user);
 }
@@ -386,9 +428,13 @@ export function loginUserLocal(identifier: string, password: string): { success:
 }
 
 export function syncFirebaseCustomerLocal(payload: {
+  uid?: string;
+  docId?: string;
   name?: string;
   email: string;
   phone?: string;
+  address?: string;
+  status?: 'active' | 'blocked';
 }): { success: boolean; message: string; user?: User } {
   ensureSeeded();
   const cleanEmail = payload.email.trim().toLowerCase();
@@ -397,19 +443,29 @@ export function syncFirebaseCustomerLocal(payload: {
   }
   const cleanName = payload.name?.trim() || '';
   const cleanPhone = payload.phone ? payload.phone.replace(/\D/g, '').slice(-10) : '';
+  const cleanAddress = payload.address?.trim() || '';
 
   const users = readJSON<StoredUser[]>(KEYS.users, DEFAULT_USERS);
-  const existingIdx = users.findIndex((u) => u.email && u.email.toLowerCase() === cleanEmail);
+  const existingIdx = users.findIndex(
+    (u) =>
+      (payload.uid && u.uid === payload.uid) ||
+      (u.email && u.email.toLowerCase() === cleanEmail)
+  );
 
   if (existingIdx !== -1) {
     const found = users[existingIdx];
-    if (found.status === 'blocked') {
+    const effectiveStatus = payload.status || found.status;
+    if (effectiveStatus === 'blocked') {
       return { success: false, message: 'Your account has been suspended.' };
     }
     const updatedUser: StoredUser = {
       ...found,
+      uid: payload.uid || found.uid,
+      docId: payload.docId || found.docId || payload.uid,
       name: cleanName && (!found.name || found.name === 'Smart Basket Customer') ? cleanName : found.name || cleanName || cleanEmail.split('@')[0],
       phone: cleanPhone || found.phone || '',
+      address: cleanAddress || found.address || '',
+      status: effectiveStatus,
     };
     users[existingIdx] = updatedUser;
     writeJSON(KEYS.users, users);
@@ -421,12 +477,14 @@ export function syncFirebaseCustomerLocal(payload: {
   const nextId = users.reduce((max, u) => Math.max(max, u.id), 0) + 1;
   const newUser: StoredUser = {
     id: nextId,
+    uid: payload.uid,
+    docId: payload.docId || payload.uid,
     name: cleanName || cleanEmail.split('@')[0] || 'Customer',
     phone: cleanPhone,
     email: cleanEmail,
     password: '',
-    address: '',
-    status: 'active',
+    address: cleanAddress,
+    status: payload.status || 'active',
     created_at: new Date().toISOString(),
   };
   writeJSON(KEYS.users, [newUser, ...users]);

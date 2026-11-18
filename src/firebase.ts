@@ -1,5 +1,6 @@
 import { initializeApp } from 'firebase/app';
 import { GoogleAuthProvider, getAuth } from 'firebase/auth';
+import { getFirestore } from 'firebase/firestore';
 
 const firebaseConfig = {
   apiKey: "AIzaSyDog4msPwRlx-lc41Wf9cfzoqWxNIGKjb0",
@@ -13,6 +14,7 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
+export const db = getFirestore(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({
   prompt: 'select_account',
@@ -52,4 +54,20 @@ export function getFirebaseAuthErrorMessage(error: unknown): string {
       if (message) return message;
       return 'Authentication failed. Please try again.';
   }
+}
+
+export function getFirestoreErrorMessage(error: unknown): string {
+  const err = error as { code?: string; message?: string } | null;
+  const code = err?.code?.trim() || '';
+  const message = err?.message?.trim() || '';
+
+  if (code === 'permission-denied' || code === 'firestore/permission-denied') {
+    return 'Firestore permission denied. Please ensure you are signed in or update Firestore Security Rules in Firebase Console.';
+  }
+  if (code === 'unavailable' || code === 'firestore/unavailable') {
+    return 'Unable to reach Firestore right now. Please check your internet connection.';
+  }
+  if (code && message) return `${code}: ${message}`;
+  if (message) return message;
+  return 'Database sync error. Please try again.';
 }

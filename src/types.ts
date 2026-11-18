@@ -1,11 +1,13 @@
 export interface Category {
   id: number;
+  docId?: string;
   name: string;
   image: string;
 }
 
 export interface Product {
   id: number;
+  docId?: string;
   cat_id: number;
   name: string;
   description: string;
@@ -20,6 +22,8 @@ export interface Product {
 
 export interface User {
   id: number;
+  uid?: string;
+  docId?: string;
   name: string;
   phone: string;
   email: string;
@@ -32,6 +36,7 @@ export interface OrderItem {
   id: number;
   order_id: number;
   product_id: number;
+  product_doc_id?: string;
   product_name: string;
   product_image: string;
   quantity: number;
@@ -40,11 +45,16 @@ export interface OrderItem {
 
 export interface Order {
   id: number;
+  docId?: string;
   user_id: number;
+  userId?: string;
   name: string;
   phone: string;
+  email?: string;
   address: string;
   total_amount: number;
+  total?: number;
+  paymentMethod?: string;
   status: 'Placed' | 'Dispatched' | 'Delivered' | 'Cancelled';
   created_at: string;
   items: OrderItem[];

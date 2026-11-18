@@ -15,15 +15,22 @@ import {
 import { AdminView } from './components/AdminView';
 import { auth, getFirebaseAuthErrorMessage, googleProvider } from './firebase';
 import {
+  cancelOrderFirestore,
+  placeOrderFirestore,
+  subscribeCategoriesFirestore,
+  subscribeCustomerOrdersFirestore,
+  subscribeProductsFirestore,
+  syncUserProfileFirestore,
+  updateUserProfileFirestore,
+} from './services/firestoreService';
+import {
   ASSETS,
-  cancelOrderLocal,
-  changePasswordLocal,
   getBootstrapData,
-  placeOrderLocal,
   saveCart,
   setStoredCurrentUser,
   syncFirebaseCustomerLocal,
   updateProfileLocal,
+  changePasswordLocal,
 } from './store/localStore';
 import {
   CartEntry,
@@ -166,11 +173,18 @@ export default function App() {
     []
   );
 
+  const refreshLocalSession = useCallback(() => {
+    const data = getBootstrapData();
+    setAdminUsername(data.adminUsername);
+    setCart(data.cart);
+    setCurrentUser(data.currentUser);
+  }, []);
+
   const loadBootstrap = useCallback(() => {
     const data = getBootstrapData();
     setCategories(data.categories);
     setProducts(data.products);
-    setOrders(data.orders);
+    setOrders([]);
     setUsers(data.users);
     setAdminUsername(data.adminUsername);
     setCart(data.cart);
@@ -180,6 +194,46 @@ export default function App() {
   useEffect(() => {
     loadBootstrap();
   }, [loadBootstrap]);
+
+  // Real-time Firestore sync for categories and products across all devices
+  useEffect(() => {
+    const unsubCategories = subscribeCategoriesFirestore((list) => {
+      setCategories(list);
+    });
+    const unsubProducts = subscribeProductsFirestore(
+      (list) => {
+        setProducts(list);
+      },
+      (errMsg) => {
+        showModal({ title: 'Catalog Sync Notice', message: errMsg, type: 'error' });
+      }
+    );
+    return () => {
+      unsubCategories();
+      unsubProducts();
+    };
+  }, [showModal]);
+
+  // Real-time Firestore sync for signed-in customer's orders
+  const activeCustomerUid = currentUser?.uid || auth.currentUser?.uid || '';
+  useEffect(() => {
+    if (!activeCustomerUid) {
+      setOrders([]);
+      return;
+    }
+    const unsubOrders = subscribeCustomerOrdersFirestore(
+      activeCustomerUid,
+      (list) => {
+        setOrders(list);
+      },
+      (errMsg) => {
+        showModal({ title: 'Orders Sync Notice', message: errMsg, type: 'error' });
+      }
+    );
+    return () => {
+      unsubOrders();
+    };
+  }, [activeCustomerUid, showModal]);
 
   // Auto-slide offer banners every 4 seconds on Home screen
   useEffect(() => {
@@ -194,20 +248,48 @@ export default function App() {
   useEffect(() => {
     let active = true;
 
-    getRedirectResult(auth)
-      .then((result) => {
-        if (!active || !result?.user?.email) return;
-        const sync = syncFirebaseCustomerLocal({
-          name: result.user.displayName || undefined,
-          email: result.user.email,
-          phone: result.user.phoneNumber || undefined,
+    const syncSignedInUser = async (fbUser: NonNullable<typeof auth.currentUser>) => {
+      if (!fbUser.email) return null;
+      const fsSync = await syncUserProfileFirestore({
+        uid: fbUser.uid,
+        name: fbUser.displayName || undefined,
+        email: fbUser.email,
+        phone: fbUser.phoneNumber || undefined,
+      });
+      if (fsSync.success && fsSync.user) {
+        const localSync = syncFirebaseCustomerLocal({
+          uid: fbUser.uid,
+          docId: fbUser.uid,
+          name: fsSync.user.name,
+          email: fsSync.user.email,
+          phone: fsSync.user.phone,
+          address: fsSync.user.address,
+          status: fsSync.user.status,
         });
-        if (sync.success && sync.user) {
-          loadBootstrap();
-          setCurrentUser(sync.user);
+        return localSync.user || fsSync.user;
+      }
+      if (!fsSync.success && fsSync.message.includes('suspended')) {
+        setAuthError(fsSync.message);
+        return null;
+      }
+      const fallback = syncFirebaseCustomerLocal({
+        uid: fbUser.uid,
+        docId: fbUser.uid,
+        name: fbUser.displayName || undefined,
+        email: fbUser.email,
+        phone: fbUser.phoneNumber || undefined,
+      });
+      return fallback.user || null;
+    };
+
+    getRedirectResult(auth)
+      .then(async (result) => {
+        if (!active || !result?.user?.email) return;
+        const user = await syncSignedInUser(result.user);
+        if (active && user) {
+          refreshLocalSession();
+          setCurrentUser(user);
           setPage((prev) => (prev === 'login' ? 'home' : prev));
-        } else if (!sync.success) {
-          setAuthError(sync.message);
         }
       })
       .catch((err) => {
@@ -215,16 +297,12 @@ export default function App() {
         setAuthError(getFirebaseAuthErrorMessage(err));
       });
 
-    const unsubscribe = onAuthStateChanged(auth, (fbUser) => {
+    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       if (!active || isAuthActionInFlightRef.current) return;
       if (fbUser?.email) {
-        const sync = syncFirebaseCustomerLocal({
-          name: fbUser.displayName || undefined,
-          email: fbUser.email,
-          phone: fbUser.phoneNumber || undefined,
-        });
-        if (sync.success && sync.user) {
-          setCurrentUser(sync.user);
+        const user = await syncSignedInUser(fbUser);
+        if (active && user) {
+          setCurrentUser(user);
         }
       }
     });
@@ -233,7 +311,7 @@ export default function App() {
       active = false;
       unsubscribe();
     };
-  }, [loadBootstrap]);
+  }, [refreshLocalSession]);
 
   // Mobile UX restrictions: disable right-click, text selection, and zoom
   useEffect(() => {
@@ -311,8 +389,12 @@ export default function App() {
   );
 
   const userOrders = useMemo(() => {
-    const uid = currentUser?.id || 1;
-    return orders.filter((o) => o.user_id === uid);
+    if (!currentUser) return [];
+    return orders.filter(
+      (o) =>
+        (o.userId && (o.userId === currentUser.uid || o.userId === String(currentUser.id))) ||
+        o.user_id === currentUser.id
+    );
   }, [orders, currentUser]);
 
   const activeOrders = useMemo(
@@ -371,7 +453,7 @@ export default function App() {
   };
 
   const completeCustomerLogin = (user: User) => {
-    loadBootstrap();
+    refreshLocalSession();
     setCurrentUser(user);
     setAuthError('');
     setAuthPassword('');
@@ -395,10 +477,23 @@ export default function App() {
 
     try {
       const cred = await signInWithEmailAndPassword(auth, email, authPassword);
-      const res = syncFirebaseCustomerLocal({
+      const fsRes = await syncUserProfileFirestore({
+        uid: cred.user.uid,
         name: cred.user.displayName || undefined,
         email: cred.user.email || email,
         phone: cred.user.phoneNumber || undefined,
+      });
+      if (!fsRes.success && fsRes.message.includes('suspended')) {
+        setAuthError(fsRes.message);
+        return;
+      }
+      const res = syncFirebaseCustomerLocal({
+        uid: cred.user.uid,
+        docId: cred.user.uid,
+        name: fsRes.user?.name || cred.user.displayName || undefined,
+        email: cred.user.email || email,
+        phone: fsRes.user?.phone || cred.user.phoneNumber || undefined,
+        address: fsRes.user?.address,
       });
       if (!res.success || !res.user) {
         setAuthError(res.message || 'Unable to sign in.');
@@ -446,10 +541,19 @@ export default function App() {
     try {
       const cred = await createUserWithEmailAndPassword(auth, email, authPassword);
       await updateProfile(cred.user, { displayName: name }).catch(() => {});
-      const res = syncFirebaseCustomerLocal({
+      const fsRes = await syncUserProfileFirestore({
+        uid: cred.user.uid,
         name,
         email: cred.user.email || email,
         phone: cleanDigits,
+      });
+      const res = syncFirebaseCustomerLocal({
+        uid: cred.user.uid,
+        docId: cred.user.uid,
+        name: fsRes.user?.name || name,
+        email: cred.user.email || email,
+        phone: fsRes.user?.phone || cleanDigits,
+        address: fsRes.user?.address,
       });
       if (!res.success || !res.user) {
         setAuthError(res.message || 'Unable to create account.');
@@ -479,10 +583,23 @@ export default function App() {
         setAuthError('Google account did not return an email address.');
         return;
       }
-      const res = syncFirebaseCustomerLocal({
+      const fsRes = await syncUserProfileFirestore({
+        uid: cred.user.uid,
         name: cred.user.displayName || undefined,
         email,
         phone: cred.user.phoneNumber || undefined,
+      });
+      if (!fsRes.success && fsRes.message.includes('suspended')) {
+        setAuthError(fsRes.message);
+        return;
+      }
+      const res = syncFirebaseCustomerLocal({
+        uid: cred.user.uid,
+        docId: cred.user.uid,
+        name: fsRes.user?.name || cred.user.displayName || undefined,
+        email,
+        phone: fsRes.user?.phone || cred.user.phoneNumber || undefined,
+        address: fsRes.user?.address,
       });
       if (!res.success || !res.user) {
         setAuthError(res.message || 'Unable to sign in with Google.');
@@ -515,6 +632,7 @@ export default function App() {
   const handleCustomerLogout = () => {
     setStoredCurrentUser(null);
     setCurrentUser(null);
+    setOrders([]);
     setAuthError('');
     setAuthPassword('');
     signOut(auth).catch(() => {});
@@ -522,7 +640,7 @@ export default function App() {
     setPage('login');
   };
 
-  const handlePlaceOrder = (e: React.FormEvent) => {
+  const handlePlaceOrder = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser) {
       showModal({
@@ -535,17 +653,20 @@ export default function App() {
       return;
     }
     showLoader('Placing order...');
-    const res = placeOrderLocal({
-      user_id: currentUser.id,
+    const res = await placeOrderFirestore({
+      userId: currentUser.uid || auth.currentUser?.uid || String(currentUser.id),
+      numericUserId: currentUser.id,
       name: checkoutName,
       phone: checkoutPhone,
+      email: currentUser.email || auth.currentUser?.email || '',
       address: checkoutAddress,
-      items: cart.map((c) => ({ product_id: c.product.id, quantity: c.quantity })),
+      paymentMethod: 'Cash on Delivery',
+      items: cart.map((c) => ({ product: c.product, quantity: c.quantity })),
     });
     hideLoader();
     if (res.success) {
       saveCart([]);
-      loadBootstrap();
+      setCart([]);
       setOrderTab('active');
       setPage('orders');
       showModal({ title: 'Order Confirmed', message: res.message, type: 'success' });
@@ -554,17 +675,16 @@ export default function App() {
     }
   };
 
-  const handleCancelOrder = (orderId: number) => {
+  const handleCancelOrder = (ord: Order) => {
     showModal({
-      title: `Cancel Order #${orderId}`,
+      title: `Cancel Order #${ord.id}`,
       message: 'Are you sure you want to cancel this order?',
       type: 'info',
       confirmText: 'Yes, Cancel',
-      onConfirm: () => {
+      onConfirm: async () => {
         showLoader('Cancelling...');
-        const res = cancelOrderLocal(orderId, currentUser?.id || 1);
+        const res = await cancelOrderFirestore(ord);
         hideLoader();
-        loadBootstrap();
         if (!res.success) {
           showModal({ title: 'Notice', message: res.message, type: 'error' });
         }
@@ -583,15 +703,29 @@ export default function App() {
       email: profEmail,
       address: profAddress,
     });
+    const fsRes = await updateUserProfileFirestore({
+      uid: currentUser.uid || auth.currentUser?.uid,
+      docId: currentUser.docId || currentUser.uid || auth.currentUser?.uid,
+      id: currentUser.id,
+      name: profName,
+      phone: profPhone,
+      email: profEmail,
+      address: profAddress,
+    });
     if (res.success && auth.currentUser && profName.trim()) {
       await updateProfile(auth.currentUser, { displayName: profName.trim() }).catch(() => {});
     }
     hideLoader();
     if (res.success && res.user) {
-      loadBootstrap();
+      refreshLocalSession();
       setCurrentUser(res.user);
     }
-    showModal({ title: res.success ? 'Saved' : 'Error', message: res.message, type: res.success ? 'success' : 'error' });
+    const finalOk = res.success && fsRes.success;
+    showModal({
+      title: finalOk ? 'Saved' : 'Error',
+      message: !fsRes.success ? fsRes.message : res.message,
+      type: finalOk ? 'success' : 'error',
+    });
   };
 
   const handlePasswordChange = async (e: React.FormEvent) => {
@@ -810,7 +944,7 @@ export default function App() {
             <i className={`fa-solid fa-chevron-down text-[10px] transition-transform ${isExpanded ? 'rotate-180' : ''}`}></i>
           </button>
           {ord.status === 'Placed' && (
-            <button type="button" onClick={() => handleCancelOrder(ord.id)} className="text-xs font-semibold text-rose-600 hover:text-rose-700">
+            <button type="button" onClick={() => handleCancelOrder(ord)} className="text-xs font-semibold text-rose-600 hover:text-rose-700">
               Cancel Order
             </button>
           )}
@@ -832,7 +966,7 @@ export default function App() {
             <div className="pt-2 border-t border-slate-200/70 text-xs text-slate-600 space-y-1">
               <p><strong className="text-slate-800">Recipient:</strong> {ord.name} · {ord.phone}</p>
               <p><strong className="text-slate-800">Delivery Address:</strong> {ord.address}</p>
-              <p><strong className="text-slate-800">Payment:</strong> Cash on Delivery</p>
+              <p><strong className="text-slate-800">Payment:</strong> {ord.paymentMethod || 'Cash on Delivery'}</p>
             </div>
           </div>
         )}
@@ -849,7 +983,7 @@ export default function App() {
           orders={orders}
           users={users}
           adminUsername={adminUsername}
-          onRefresh={loadBootstrap}
+          onRefresh={refreshLocalSession}
           onExitAdmin={() => setMode('user')}
           showLoader={showLoader}
           hideLoader={hideLoader}
@@ -1660,16 +1794,30 @@ export default function App() {
                 </button>
               </div>
 
-              <div className="space-y-3.5">
-                {(orderTab === 'active' ? activeOrders : historyOrders).length === 0 ? (
-                  <div className="bg-white rounded-xl border border-slate-200 p-8 text-center">
-                    <i className="fa-solid fa-box text-3xl text-slate-300"></i>
-                    <p className="mt-3 text-sm font-semibold text-slate-700">No orders in this tab yet.</p>
-                  </div>
-                ) : (
-                  (orderTab === 'active' ? activeOrders : historyOrders).map(renderOrderCard)
-                )}
-              </div>
+              {!currentUser ? (
+                <div className="bg-white rounded-xl border border-slate-200 p-8 text-center space-y-3">
+                  <i className="fa-solid fa-box text-3xl text-slate-300"></i>
+                  <p className="text-sm font-semibold text-slate-700">Please login to view your live orders.</p>
+                  <button
+                    type="button"
+                    onClick={() => setPage('login')}
+                    className="px-5 py-2.5 rounded-lg bg-[#2874F0] text-white text-xs font-bold hover:bg-[#1e60d5] transition"
+                  >
+                    Login / Sign Up
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-3.5">
+                  {(orderTab === 'active' ? activeOrders : historyOrders).length === 0 ? (
+                    <div className="bg-white rounded-xl border border-slate-200 p-8 text-center">
+                      <i className="fa-solid fa-box text-3xl text-slate-300"></i>
+                      <p className="mt-3 text-sm font-semibold text-slate-700">No orders in this tab yet.</p>
+                    </div>
+                  ) : (
+                    (orderTab === 'active' ? activeOrders : historyOrders).map(renderOrderCard)
+                  )}
+                </div>
+              )}
             </main>
           )}
 
