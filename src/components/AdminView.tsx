@@ -3,24 +3,47 @@ import {
   deleteCategoryFirestore,
   deleteProductFirestore,
   deleteUserFirestore,
+  filterOrderForSeller,
+  markSellerPayoutPaidFirestore,
   saveCategoryFirestore,
   saveProductFirestore,
   subscribeAllOrdersFirestore,
+  subscribeAllSellersFirestore,
   subscribeAllUsersFirestore,
   toggleUserBlockFirestore,
   updateOrderStatusFirestore,
+  updateOrderTrackingFirestore,
+  updateSellerStatusFirestore,
 } from '../services/firestoreService';
 import {
   ASSETS,
   IMAGE_CHOICES,
   getBootstrapData,
+  getStoredSellersLocal,
   loginAdminLocal,
+  saveProductLocal,
   setStoredAdminLoggedIn,
   updateAdminSettingsLocal,
 } from '../store/localStore';
-import { Category, Order, Product, User, formatINR, getEffectiveMrp } from '../types';
+import {
+  COURIER_PARTNERS,
+  Category,
+  ORDER_STATUS_OPTIONS,
+  Order,
+  OrderStatus,
+  Product,
+  SellerProfile,
+  User,
+  calculateSellerEarnings,
+  formatINR,
+  getCourierTrackingUrl,
+  getEffectiveMrp,
+  getOrderStatusLabel,
+  normalizeOrderStatus,
+  normalizeSellerStatus,
+} from '../types';
 
-type AdminTab = 'dashboard' | 'categories' | 'products' | 'orders' | 'order_detail' | 'users' | 'settings';
+type AdminTab = 'dashboard' | 'categories' | 'products' | 'orders' | 'order_detail' | 'sellers' | 'users' | 'settings';
 
 function compressImageFileToDataUrl(file: File, maxDimension = 500, quality = 0.7): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -105,6 +128,7 @@ export const AdminView: React.FC<Props> = ({
   const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
   const [liveOrders, setLiveOrders] = useState<Order[]>(orders);
   const [liveUsers, setLiveUsers] = useState<User[]>(users);
+  const [liveSellers, setLiveSellers] = useState<SellerProfile[]>(() => getStoredSellersLocal());
 
   // Admin Login Form
   const [loginUser, setLoginUser] = useState('Seraj');
@@ -130,8 +154,13 @@ export const AdminView: React.FC<Props> = ({
   const [imageCompressing, setImageCompressing] = useState(false);
   const [imageUploadError, setImageUploadError] = useState('');
 
-  // Order Detail Status
-  const [orderStatusDraft, setOrderStatusDraft] = useState<Order['status']>('Placed');
+  // Order Detail Status & Real-World Courier Tracking Drafts
+  const [orderStatusDraft, setOrderStatusDraft] = useState<OrderStatus>('Confirmed');
+  const [trackingCourierDraft, setTrackingCourierDraft] = useState<string>('Delhivery');
+  const [trackingIdDraft, setTrackingIdDraft] = useState<string>('');
+  const [trackingUrlDraft, setTrackingUrlDraft] = useState<string>('');
+  const [trackingNoteDraft, setTrackingNoteDraft] = useState<string>('');
+  const [trackingModalOrder, setTrackingModalOrder] = useState<Order | null>(null);
 
   // Admin Settings
   const [settingsUser, setSettingsUser] = useState(adminUsername);
@@ -147,9 +176,11 @@ export const AdminView: React.FC<Props> = ({
       (list) => setLiveUsers(list),
       (errMsg) => showModal({ title: 'Users Sync Notice', message: errMsg, type: 'error' })
     );
+    const unsubSellers = subscribeAllSellersFirestore((list) => setLiveSellers(list));
     return () => {
       unsubOrders();
       unsubUsers();
+      unsubSellers();
     };
   }, [isAdminLoggedIn, showModal]);
 
@@ -231,7 +262,12 @@ export const AdminView: React.FC<Props> = ({
   const revenue = liveOrders.filter((o) => o.status !== 'Cancelled').reduce((acc, o) => acc + o.total_amount, 0);
   const activeProducts = products.filter((p) => p.stock > 0).length;
   const cancellations = liveOrders.filter((o) => o.status === 'Cancelled').length;
-  const shipments = liveOrders.filter((o) => o.status === 'Dispatched' || o.status === 'Delivered').length;
+  const shipments = liveOrders.filter((o) =>
+    ['Packed', 'Shipped', 'Dispatched', 'Delivered'].includes(o.status)
+  ).length;
+  const pendingSellersCount = liveSellers.filter((s) => normalizeSellerStatus(s.status) === 'pending').length;
+  const pendingPayoutSellersCount = liveSellers.filter((s) => Number(s.pendingPayoutAmount || 0) > 0).length;
+  const sellerAttentionCount = pendingSellersCount + pendingPayoutSellersCount;
   const activeOrder = liveOrders.find((o) => o.id === selectedOrderId) || null;
 
   const openCategoryModal = (cat?: Category) => {
@@ -314,6 +350,7 @@ export const AdminView: React.FC<Props> = ({
     showLoader('Saving product...');
     const priceNum = Number(prodPrice);
     const mrpNum = Number(prodMrp);
+    const stockNum = Math.max(0, Math.floor(Number(prodStock) || 0));
     const res = await saveProductFirestore({
       id: editingProd?.id || 0,
       docId: editingProd?.docId,
@@ -324,18 +361,42 @@ export const AdminView: React.FC<Props> = ({
       mrp: mrpNum > priceNum ? mrpNum : undefined,
       rating: editingProd?.rating,
       reviews: editingProd?.reviews,
-      stock: Number(prodStock),
+      stock: stockNum,
       image: prodImage,
       created_at: editingProd?.created_at,
+      sellerId: editingProd?.sellerId,
+      sellerEmail: editingProd?.sellerEmail,
+      sellerName: editingProd?.sellerName,
     });
-    hideLoader();
-    if (res.success) {
-      setProdModalOpen(false);
-      onRefresh();
-      showModal({ title: 'Saved', message: res.message, type: 'success' });
-    } else {
-      showModal({ title: 'Validation Error', message: res.message, type: 'error' });
+    if (!res.success) {
+      const localRes = saveProductLocal({
+        id: editingProd?.id || 0,
+        cat_id: prodCatId,
+        name: prodName,
+        description: prodDesc,
+        price: priceNum,
+        mrp: mrpNum > priceNum ? mrpNum : undefined,
+        rating: editingProd?.rating,
+        stock: stockNum,
+        image: prodImage,
+        sellerId: editingProd?.sellerId,
+        sellerEmail: editingProd?.sellerEmail,
+        sellerName: editingProd?.sellerName,
+      });
+      hideLoader();
+      if (localRes.success) {
+        setProdModalOpen(false);
+        onRefresh();
+        showModal({ title: 'Saved', message: localRes.message, type: 'success' });
+      } else {
+        showModal({ title: 'Validation Error', message: localRes.message, type: 'error' });
+      }
+      return;
     }
+    hideLoader();
+    setProdModalOpen(false);
+    onRefresh();
+    showModal({ title: 'Saved', message: res.message, type: 'success' });
   };
 
   const deleteProduct = (prod: Product) => {
@@ -357,18 +418,130 @@ export const AdminView: React.FC<Props> = ({
     });
   };
 
-  const updateOrderStatus = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!activeOrder) return;
-    showLoader('Updating status...');
-    const res = await updateOrderStatusFirestore(activeOrder, orderStatusDraft);
+  const populateTrackingDrafts = (ord: Order) => {
+    setOrderStatusDraft(normalizeOrderStatus(ord.status));
+    setTrackingCourierDraft(ord.courierName || 'Delhivery');
+    setTrackingIdDraft(ord.trackingId || '');
+    setTrackingUrlDraft(ord.trackingUrl || '');
+    setTrackingNoteDraft(ord.trackingNote || '');
+  };
+
+  const openTrackingModal = (ord: Order) => {
+    populateTrackingDrafts(ord);
+    setTrackingModalOrder(ord);
+  };
+
+  const handleQuickOrderStatusUpdate = async (ord: Order, nextStatus: OrderStatus) => {
+    showLoader('Updating order status...');
+    const res = await updateOrderStatusFirestore(ord, nextStatus);
     hideLoader();
     if (res.success) {
+      setLiveOrders((prev) => prev.map((o) => (o.id === ord.id ? { ...o, status: nextStatus } : o)));
+      setOrderStatusDraft(nextStatus);
       onRefresh();
-      showModal({ title: 'Status Updated', message: res.message, type: 'success' });
     } else {
       showModal({ title: 'Error', message: res.message, type: 'error' });
     }
+  };
+
+  const handleSaveOrderTracking = async (targetOrder: Order, e: React.FormEvent) => {
+    e.preventDefault();
+    const payload = {
+      status: orderStatusDraft,
+      courierName: trackingCourierDraft.trim(),
+      trackingId: trackingIdDraft.trim(),
+      trackingUrl: trackingUrlDraft.trim(),
+      trackingNote: trackingNoteDraft.trim(),
+    };
+    showLoader('Updating live tracking...');
+    const res = await updateOrderTrackingFirestore(targetOrder, payload);
+    hideLoader();
+    if (res.success) {
+      setLiveOrders((prev) =>
+        prev.map((o) =>
+          o.id === targetOrder.id
+            ? {
+                ...o,
+                status: payload.status,
+                courierName: payload.courierName || undefined,
+                trackingId: payload.trackingId || undefined,
+                trackingUrl: payload.trackingUrl || undefined,
+                trackingNote: payload.trackingNote || undefined,
+              }
+            : o
+        )
+      );
+      setTrackingModalOrder(null);
+      onRefresh();
+      showModal({ title: 'Tracking Updated', message: res.message, type: 'success' });
+    } else {
+      showModal({ title: 'Error', message: res.message, type: 'error' });
+    }
+  };
+
+  const handleSellerApprovalToggle = async (
+    seller: SellerProfile,
+    nextStatus: 'approved' | 'pending' | 'blocked'
+  ) => {
+    showLoader('Updating seller status...');
+    const res = await updateSellerStatusFirestore(seller, nextStatus);
+    hideLoader();
+    setLiveSellers((prev) =>
+      prev.map((s) =>
+        (s.docId || s.uid || s.id) === (seller.docId || seller.uid || seller.id)
+          ? { ...s, status: nextStatus }
+          : s
+      )
+    );
+    onRefresh();
+    showModal({
+      title: res.success ? 'Seller Status Updated' : 'Notice',
+      message: res.message,
+      type: res.success ? 'success' : 'error',
+    });
+  };
+
+  const handleMarkSellerPayoutPaid = (seller: SellerProfile, amountToPay: number) => {
+    if (amountToPay <= 0) {
+      showModal({
+        title: 'No Pending Payout',
+        message: `${seller.storeName} has no pending payout balance to settle.`,
+        type: 'info',
+      });
+      return;
+    }
+    showModal({
+      title: 'Mark Seller Payout Paid',
+      message: `Confirm that ${formatINR(amountToPay)} has been transferred to ${seller.storeName} (${seller.payoutAccount || 'No UPI/Bank saved'})?`,
+      type: 'info',
+      confirmText: 'Mark Payout Paid',
+      onConfirm: async () => {
+        showLoader('Marking payout as paid...');
+        const res = await markSellerPayoutPaidFirestore(seller, amountToPay);
+        hideLoader();
+        if (res.success && res.seller) {
+          setLiveSellers((prev) =>
+            prev.map((s) =>
+              (s.docId || s.uid || s.id) === (seller.docId || seller.uid || seller.id)
+                ? res.seller!
+                : s
+            )
+          );
+          onRefresh();
+          showModal({
+            title: 'Payout Marked Paid',
+            message: res.message,
+            type: 'success',
+          });
+        } else {
+          showModal({
+            title: 'Payout Error',
+            message: res.message,
+            type: 'error',
+          });
+        }
+      },
+    });
   };
 
   const toggleUserBlock = async (user: User) => {
@@ -436,14 +609,19 @@ export const AdminView: React.FC<Props> = ({
           </div>
 
           <nav className="hidden lg:flex items-center gap-5 text-xs font-semibold text-blue-100">
-            {(['dashboard', 'categories', 'products', 'orders', 'users', 'settings'] as AdminTab[]).map((t) => (
+            {(['dashboard', 'categories', 'products', 'orders', 'sellers', 'users', 'settings'] as AdminTab[]).map((t) => (
               <button
                 key={t}
                 type="button"
                 onClick={() => setAdminTab(t)}
-                className={`capitalize whitespace-nowrap transition ${adminTab === t ? 'text-[#FFE500] font-bold' : 'hover:text-white'}`}
+                className={`capitalize whitespace-nowrap transition inline-flex items-center gap-1 ${adminTab === t ? 'text-[#FFE500] font-bold' : 'hover:text-white'}`}
               >
-                {t}
+                <span>{t}</span>
+                {t === 'sellers' && sellerAttentionCount > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full bg-[#FFE500] text-[#2874F0] text-[10px] font-extrabold tabular-nums">
+                    {sellerAttentionCount}
+                  </span>
+                )}
               </button>
             ))}
           </nav>
@@ -504,6 +682,7 @@ export const AdminView: React.FC<Props> = ({
             { id: 'categories', label: 'Categories', icon: 'fa-tags' },
             { id: 'products', label: 'Products', icon: 'fa-boxes-stacked' },
             { id: 'orders', label: 'Orders', icon: 'fa-receipt' },
+            { id: 'sellers', label: 'Sellers Management', icon: 'fa-store', badge: sellerAttentionCount },
             { id: 'users', label: 'Users', icon: 'fa-users' },
             { id: 'settings', label: 'Settings', icon: 'fa-gear' },
           ].map((item) => (
@@ -514,10 +693,17 @@ export const AdminView: React.FC<Props> = ({
                 setAdminTab(item.id as AdminTab);
                 setSidebarOpen(false);
               }}
-              className={`w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-medium ${adminTab === item.id ? 'bg-blue-50 text-[#2874F0] font-bold' : 'text-slate-700 hover:bg-slate-100'}`}
+              className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium ${adminTab === item.id ? 'bg-blue-50 text-[#2874F0] font-bold' : 'text-slate-700 hover:bg-slate-100'}`}
             >
-              <i className={`fa-solid ${item.icon} w-5 text-center`}></i>
-              <span>{item.label}</span>
+              <span className="flex items-center gap-3">
+                <i className={`fa-solid ${item.icon} w-5 text-center`}></i>
+                <span>{item.label}</span>
+              </span>
+              {item.badge ? (
+                <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-extrabold tabular-nums">
+                  {item.badge}
+                </span>
+              ) : null}
             </button>
           ))}
         </nav>
@@ -609,9 +795,16 @@ export const AdminView: React.FC<Props> = ({
                   <i className="fa-solid fa-truck text-[#FB641B] text-lg"></i>
                   <span className="text-xs font-bold">Manage Orders</span>
                 </button>
-                <button type="button" onClick={() => setAdminTab('categories')} className="p-4 rounded-xl bg-white border border-slate-200 text-slate-800 hover:border-[#2874F0] transition flex items-center gap-3">
-                  <i className="fa-solid fa-tags text-[#388E3C] text-lg"></i>
-                  <span className="text-xs font-bold">Categories</span>
+                <button type="button" onClick={() => setAdminTab('sellers')} className="p-4 rounded-xl bg-white border border-slate-200 text-slate-800 hover:border-[#2874F0] transition flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-3">
+                    <i className="fa-solid fa-store text-[#388E3C] text-lg"></i>
+                    <span className="text-xs font-bold">Sellers ({liveSellers.length})</span>
+                  </span>
+                  {pendingSellersCount > 0 && (
+                    <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-extrabold tabular-nums">
+                      {pendingSellersCount}
+                    </span>
+                  )}
                 </button>
               </div>
             </div>
@@ -665,10 +858,20 @@ export const AdminView: React.FC<Props> = ({
                   <div className="flex-1 min-w-0">
                     <p className="text-[11px] font-medium text-slate-500 truncate">{categories.find((c) => c.id === prod.cat_id)?.name || 'General'}</p>
                     <h3 className="text-sm font-bold text-slate-900 truncate">{prod.name}</h3>
-                    <div className="mt-1 flex items-center gap-2.5 text-xs">
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-xs">
                       <span className="font-extrabold text-slate-900 font-mono tabular-nums">{formatINR(prod.price)}</span>
                       <span className="text-slate-400 line-through font-mono tabular-nums">{formatINR(getEffectiveMrp(prod.price, prod.mrp))}</span>
-                      <span className={`font-semibold ${prod.stock > 0 ? 'text-[#388E3C]' : 'text-rose-600'}`}>Stock: {prod.stock}</span>
+                      {prod.stock <= 0 ? (
+                        <span className="px-2 py-0.5 rounded bg-rose-100 text-rose-700 text-[10px] font-extrabold uppercase">
+                          Out of Stock
+                        </span>
+                      ) : prod.stock <= 5 ? (
+                        <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-extrabold">
+                          Low Stock: {prod.stock}
+                        </span>
+                      ) : (
+                        <span className="font-semibold text-[#388E3C]">Stock: {prod.stock}</span>
+                      )}
                     </div>
                     <div className="mt-2.5 flex items-center gap-2">
                       <button type="button" onClick={() => openProductModal(prod)} className="px-3 py-1.5 rounded-lg bg-blue-50 text-[#2874F0] text-xs font-bold hover:bg-blue-100">
@@ -685,9 +888,24 @@ export const AdminView: React.FC<Props> = ({
           </div>
         )}
 
-        {adminTab === 'orders' && (
+        {adminTab === 'orders' && (() => {
+          const returnRequestedCount = liveOrders.filter((o) => o.status === 'Return Requested').length;
+          return (
           <div className="space-y-5">
-            <h1 className="text-xl font-extrabold text-slate-900">Orders</h1>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <h1 className="text-xl font-extrabold text-slate-900">Orders ({liveOrders.length})</h1>
+                  {returnRequestedCount > 0 && (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-100 border border-amber-300 text-amber-900 text-xs font-extrabold">
+                      <i className="fa-solid fa-rotate-left text-[11px]"></i>
+                      <span>{returnRequestedCount} Return Requested</span>
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-500 mt-0.5">Update any order status, courier tracking, or process 7-day return/refund requests live</p>
+              </div>
+            </div>
             <div className="bg-white rounded-xl border border-slate-200/80 overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse">
@@ -696,42 +914,146 @@ export const AdminView: React.FC<Props> = ({
                       <th className="py-3 px-4">Order ID</th>
                       <th className="py-3 px-4">Customer</th>
                       <th className="py-3 px-4">Amount</th>
-                      <th className="py-3 px-4">Status</th>
-                      <th className="py-3 px-4">Date</th>
+                      <th className="py-3 px-4">Live Status</th>
+                      <th className="py-3 px-4">Courier &amp; Tracking</th>
+                      <th className="py-3 px-4 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 text-sm">
                     {liveOrders.length === 0 ? (
                       <tr>
-                        <td colSpan={5} className="py-8 text-center text-xs text-slate-500">
+                        <td colSpan={6} className="py-8 text-center text-xs text-slate-500">
                           No orders placed yet.
                         </td>
                       </tr>
                     ) : (
-                      liveOrders.map((ord) => (
-                        <tr
-                          key={ord.docId || ord.id}
-                          onClick={() => {
-                            setSelectedOrderId(ord.id);
-                            setOrderStatusDraft(ord.status);
-                            setAdminTab('order_detail');
-                          }}
-                          className="hover:bg-slate-50 cursor-pointer transition"
-                        >
-                          <td className="py-3.5 px-4 font-mono font-bold text-slate-900 tabular-nums">#{ord.id}</td>
-                          <td className="py-3.5 px-4 font-semibold text-slate-800">{ord.name}</td>
-                          <td className="py-3.5 px-4 font-mono font-bold text-slate-900 tabular-nums">{formatINR(ord.total_amount)}</td>
-                          <td className="py-3.5 px-4 text-xs font-semibold text-[#2874F0]">{ord.status}</td>
-                          <td className="py-3.5 px-4 text-xs text-slate-500">{new Date(ord.created_at).toLocaleDateString('en-IN')}</td>
-                        </tr>
-                      ))
+                      liveOrders.map((ord) => {
+                        const normalizedValue = normalizeOrderStatus(ord.status);
+                        const isReturnReq = normalizedValue === 'Return Requested';
+                        const isReturnApproved = normalizedValue === 'Return Approved';
+                        return (
+                          <tr
+                            key={ord.docId || ord.id}
+                            onClick={() => {
+                              setSelectedOrderId(ord.id);
+                              populateTrackingDrafts(ord);
+                              setAdminTab('order_detail');
+                            }}
+                            className={`cursor-pointer transition ${
+                              isReturnReq ? 'bg-amber-50/70 hover:bg-amber-50' : 'hover:bg-slate-50'
+                            }`}
+                          >
+                            <td className="py-3.5 px-4 font-mono font-bold text-slate-900 tabular-nums">
+                              <div className="flex items-center gap-1.5">
+                                <span>#{ord.id}</span>
+                                {isReturnReq && (
+                                  <span className="px-1.5 py-0.5 rounded bg-amber-500 text-white font-sans text-[9px] font-extrabold uppercase tracking-wide">
+                                    Return Requested
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[10px] font-sans font-normal text-slate-400">
+                                {new Date(ord.created_at).toLocaleDateString('en-IN')}
+                              </div>
+                            </td>
+                            <td className="py-3.5 px-4 font-semibold text-slate-800">{ord.name}</td>
+                            <td className="py-3.5 px-4 font-mono font-bold text-slate-900 tabular-nums">{formatINR(ord.total_amount)}</td>
+                            <td
+                              className="py-2.5 px-4"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <select
+                                aria-label={`Status for order #${ord.id}`}
+                                value={normalizedValue}
+                                onChange={(e) =>
+                                  handleQuickOrderStatusUpdate(ord, e.target.value as OrderStatus)
+                                }
+                                className={`h-9 px-2.5 rounded-lg border text-xs font-bold focus:outline-none focus:border-[#2874F0] ${
+                                  normalizedValue === 'Delivered' || normalizedValue === 'Refunded'
+                                    ? 'bg-emerald-50 border-emerald-200 text-[#2E7D32]'
+                                    : normalizedValue === 'Return Requested'
+                                    ? 'bg-amber-100 border-amber-300 text-amber-900'
+                                    : normalizedValue === 'Cancelled'
+                                    ? 'bg-rose-50 border-rose-200 text-rose-700'
+                                    : 'bg-blue-50 border-blue-200 text-[#2874F0]'
+                                }`}
+                              >
+                                {ORDER_STATUS_OPTIONS.map((opt) => (
+                                  <option key={opt.value} value={opt.value}>
+                                    {opt.label}
+                                  </option>
+                                ))}
+                              </select>
+                              {ord.returnReason && (
+                                <p className="mt-1 text-[11px] font-semibold text-amber-800 max-w-[200px] truncate" title={ord.returnReason}>
+                                  <i className="fa-solid fa-rotate-left mr-1 text-[10px]"></i>
+                                  {ord.returnResolution || 'Return'}: {ord.returnReason}
+                                </p>
+                              )}
+                            </td>
+                            <td className="py-3 px-4 text-xs">
+                              {ord.courierName || ord.trackingId || ord.trackingNote ? (
+                                <div className="space-y-0.5 max-w-[220px]">
+                                  <p className="font-bold text-slate-800 truncate">
+                                    {ord.courierName || 'Courier'}
+                                    {ord.trackingId ? (
+                                      <span className="ml-1.5 font-mono text-[11px] text-[#2874F0]">
+                                        {ord.trackingId}
+                                      </span>
+                                    ) : null}
+                                  </p>
+                                  {ord.trackingNote && (
+                                    <p className="text-[11px] text-slate-500 truncate">{ord.trackingNote}</p>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-[11px] text-slate-400">Not assigned</span>
+                              )}
+                            </td>
+                            <td
+                              className="py-2.5 px-4 text-right"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <div className="flex flex-wrap items-center justify-end gap-1.5">
+                                {isReturnReq && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleQuickOrderStatusUpdate(ord, 'Return Approved')}
+                                    className="px-2.5 py-1.5 rounded-lg bg-amber-600 text-white text-[11px] font-bold hover:bg-amber-700 transition whitespace-nowrap"
+                                  >
+                                    Approve Return
+                                  </button>
+                                )}
+                                {(isReturnReq || isReturnApproved) && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleQuickOrderStatusUpdate(ord, 'Refunded')}
+                                    className="px-2.5 py-1.5 rounded-lg bg-[#2E7D32] text-white text-[11px] font-bold hover:bg-emerald-800 transition whitespace-nowrap"
+                                  >
+                                    Mark Refunded
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => openTrackingModal(ord)}
+                                  className="px-3 py-1.5 rounded-lg bg-[#2874F0] text-white text-xs font-bold hover:bg-[#1e60d5] transition whitespace-nowrap inline-flex items-center gap-1.5"
+                                >
+                                  <i className="fa-solid fa-truck-fast text-[11px]"></i>
+                                  <span>Update Tracking</span>
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
                     )}
                   </tbody>
                 </table>
               </div>
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {adminTab === 'order_detail' && activeOrder && (
           <div className="space-y-5 max-w-4xl">
@@ -741,11 +1063,57 @@ export const AdminView: React.FC<Props> = ({
               </button>
               <div>
                 <h1 className="text-xl font-extrabold text-slate-900 font-mono">Order #{activeOrder.id}</h1>
-                <p className="text-xs text-slate-500">{new Date(activeOrder.created_at).toLocaleString('en-IN')}</p>
+                <p className="text-xs text-slate-500">
+                  {new Date(activeOrder.created_at).toLocaleString('en-IN')} · Current: <strong className="text-[#2874F0]">{getOrderStatusLabel(activeOrder.status)}</strong>
+                </p>
               </div>
             </div>
+
+            {(activeOrder.status === 'Return Requested' ||
+              activeOrder.status === 'Return Approved' ||
+              activeOrder.status === 'Refunded' ||
+              activeOrder.returnReason) && (
+              <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded bg-amber-600 text-white text-[10px] font-extrabold uppercase tracking-wide">
+                      {activeOrder.status}
+                    </span>
+                    <span className="text-xs font-bold text-amber-950">
+                      7-Day {activeOrder.returnResolution || 'Return'} Request
+                    </span>
+                  </div>
+                  {activeOrder.returnReason && (
+                    <p className="text-xs text-amber-900">
+                      <strong>Customer Reason:</strong> {activeOrder.returnReason}
+                    </p>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  {activeOrder.status !== 'Return Approved' && activeOrder.status !== 'Refunded' && (
+                    <button
+                      type="button"
+                      onClick={() => handleQuickOrderStatusUpdate(activeOrder, 'Return Approved')}
+                      className="px-3.5 py-2 rounded-lg bg-amber-600 text-white text-xs font-bold hover:bg-amber-700 transition"
+                    >
+                      Approve Return
+                    </button>
+                  )}
+                  {activeOrder.status !== 'Refunded' && (
+                    <button
+                      type="button"
+                      onClick={() => handleQuickOrderStatusUpdate(activeOrder, 'Refunded')}
+                      className="px-3.5 py-2 rounded-lg bg-[#2E7D32] text-white text-xs font-bold hover:bg-emerald-800 transition"
+                    >
+                      Mark Refunded
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
             <div className="grid md:grid-cols-2 gap-4">
-              <div className="bg-white rounded-xl border border-slate-200/80 p-5 space-y-2">
+              <div className="bg-white rounded-xl border border-slate-200/80 p-5 space-y-2.5">
                 <h2 className="text-xs font-bold text-slate-500 uppercase">Customer &amp; Delivery</h2>
                 <p className="text-sm font-bold text-slate-900">{activeOrder.name}</p>
                 <p className="text-xs text-slate-600"><i className="fa-solid fa-phone mr-1.5"></i>{activeOrder.phone}</p>
@@ -754,21 +1122,99 @@ export const AdminView: React.FC<Props> = ({
                 )}
                 <p className="text-xs text-slate-600"><i className="fa-solid fa-location-dot mr-1.5"></i>{activeOrder.address}</p>
                 <p className="text-xs text-slate-600"><i className="fa-solid fa-wallet mr-1.5"></i>{activeOrder.paymentMethod || 'Cash on Delivery'}</p>
+                {(activeOrder.courierName || activeOrder.trackingId || activeOrder.trackingNote) && (
+                  <div className="pt-2.5 mt-2 border-t border-slate-100 space-y-1 text-xs">
+                    <p className="font-bold text-slate-800">
+                      <i className="fa-solid fa-truck-fast text-[#2874F0] mr-1.5"></i>
+                      {activeOrder.courierName || 'Courier'}
+                      {activeOrder.trackingId ? ` · AWB: ${activeOrder.trackingId}` : ''}
+                    </p>
+                    {activeOrder.trackingNote && (
+                      <p className="text-emerald-700 font-medium">{activeOrder.trackingNote}</p>
+                    )}
+                    {getCourierTrackingUrl(activeOrder.courierName, activeOrder.trackingId, activeOrder.trackingUrl) && (
+                      <a
+                        href={getCourierTrackingUrl(activeOrder.courierName, activeOrder.trackingId, activeOrder.trackingUrl)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-[#2874F0] font-bold hover:underline"
+                      >
+                        <span>Open Live Courier Link</span>
+                        <i className="fa-solid fa-arrow-up-right-from-square text-[10px]"></i>
+                      </a>
+                    )}
+                  </div>
+                )}
               </div>
-              <form onSubmit={updateOrderStatus} className="bg-white rounded-xl border border-slate-200/80 p-5 space-y-3">
-                <h2 className="text-xs font-bold text-slate-500 uppercase">Update Status</h2>
-                <select
-                  value={orderStatusDraft}
-                  onChange={(e) => setOrderStatusDraft(e.target.value as Order['status'])}
-                  className="w-full h-11 px-3.5 rounded-lg bg-slate-50 border border-slate-200 text-sm font-semibold text-slate-900"
-                >
-                  <option value="Placed">Placed</option>
-                  <option value="Dispatched">Dispatched</option>
-                  <option value="Delivered">Delivered</option>
-                  <option value="Cancelled">Cancelled</option>
-                </select>
-                <button type="submit" className="w-full h-11 rounded-lg bg-[#2874F0] text-white text-sm font-bold hover:bg-[#1e60d5] transition">
-                  Save Order Status
+              <form
+                onSubmit={(e) => handleSaveOrderTracking(activeOrder, e)}
+                className="bg-white rounded-xl border border-slate-200/80 p-5 space-y-3"
+              >
+                <h2 className="text-xs font-bold text-slate-500 uppercase">Update Tracking &amp; Status</h2>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">Order Status</label>
+                  <select
+                    value={orderStatusDraft}
+                    onChange={(e) => setOrderStatusDraft(e.target.value as OrderStatus)}
+                    className="w-full h-10 px-3 rounded-lg bg-slate-50 border border-slate-200 text-sm font-semibold text-slate-900"
+                  >
+                    {ORDER_STATUS_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">Courier Partner</label>
+                    <select
+                      value={trackingCourierDraft}
+                      onChange={(e) => setTrackingCourierDraft(e.target.value)}
+                      className="w-full h-10 px-3 rounded-lg bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900"
+                    >
+                      {COURIER_PARTNERS.map((partner) => (
+                        <option key={partner} value={partner}>
+                          {partner}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">AWB / Tracking No.</label>
+                    <input
+                      type="text"
+                      value={trackingIdDraft}
+                      onChange={(e) => setTrackingIdDraft(e.target.value)}
+                      placeholder="e.g. DLV948271630IN"
+                      className="w-full h-10 px-3 rounded-lg bg-slate-50 border border-slate-200 text-xs font-mono text-slate-900"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">Live Location / Hub Note</label>
+                  <input
+                    type="text"
+                    value={trackingNoteDraft}
+                    onChange={(e) => setTrackingNoteDraft(e.target.value)}
+                    placeholder="e.g. Dispatched from Bawana Warehouse, Delhi"
+                    className="w-full h-10 px-3 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-900"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                    Custom Tracking URL <span className="text-slate-400 font-normal">(optional, auto-links if empty)</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={trackingUrlDraft}
+                    onChange={(e) => setTrackingUrlDraft(e.target.value)}
+                    placeholder="https://..."
+                    className="w-full h-9 px-3 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-900"
+                  />
+                </div>
+                <button type="submit" className="w-full h-10 rounded-lg bg-[#2874F0] text-white text-sm font-bold hover:bg-[#1e60d5] transition">
+                  Save Tracking Update
                 </button>
               </form>
             </div>
@@ -792,6 +1238,250 @@ export const AdminView: React.FC<Props> = ({
                 ))}
               </div>
             </div>
+          </div>
+        )}
+
+        {adminTab === 'sellers' && (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h1 className="text-xl font-extrabold text-slate-900">Sellers Management ({liveSellers.length})</h1>
+                  {pendingSellersCount > 0 && (
+                    <span className="px-2.5 py-0.5 rounded-md bg-amber-100 border border-amber-300 text-amber-900 text-xs font-extrabold">
+                      {pendingSellersCount} Pending KYC
+                    </span>
+                  )}
+                  {pendingPayoutSellersCount > 0 && (
+                    <span className="px-2.5 py-0.5 rounded-md bg-emerald-100 border border-emerald-300 text-[#1B5E20] text-xs font-extrabold">
+                      {pendingPayoutSellersCount} Payout Request{pendingPayoutSellersCount === 1 ? '' : 's'}
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Review seller KYC, Bank/UPI payout IDs, 10% platform commission earnings, approve/block stores, and settle payouts.
+                </p>
+              </div>
+            </div>
+
+            {liveSellers.length === 0 ? (
+              <div className="bg-white rounded-xl border border-slate-200/80 p-10 text-center space-y-2">
+                <i className="fa-solid fa-store text-3xl text-slate-300"></i>
+                <p className="text-sm font-bold text-slate-700">No sellers registered yet</p>
+                <p className="text-xs text-slate-500">
+                  When a user registers via Become a Seller / Seller Hub, their KYC &amp; payout details will appear here.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {liveSellers.map((seller) => {
+                  const status = normalizeSellerStatus(seller.status);
+                  const sellerProducts = products.filter(
+                    (p) =>
+                      (p.sellerEmail && p.sellerEmail.toLowerCase() === seller.email.toLowerCase()) ||
+                      (p.sellerId && (p.sellerId === seller.uid || p.sellerId === seller.id))
+                  );
+                  const sellerProductCount = sellerProducts.length;
+                  const sellerProductIdSet = new Set(sellerProducts.map((p) => p.id));
+                  const sellerId = seller.uid || seller.id;
+                  const sellerDeliveredSales = liveOrders
+                    .filter((o) => o.status === 'Delivered')
+                    .reduce((sum, ord) => {
+                      const scoped = filterOrderForSeller(ord, sellerId, seller.email, sellerProductIdSet);
+                      return sum + (scoped ? scoped.total_amount : 0);
+                    }, 0);
+                  const earnings = calculateSellerEarnings(sellerDeliveredSales, seller);
+                  const hasRequestedPayout = earnings.pendingPayout > 0;
+                  const payoutActionAmount = hasRequestedPayout
+                    ? earnings.pendingPayout
+                    : earnings.withdrawableBalance;
+
+                  return (
+                    <div
+                      key={seller.docId || seller.uid || seller.id}
+                      className={`bg-white rounded-xl border p-4 sm:p-5 space-y-4 ${
+                        hasRequestedPayout
+                          ? 'border-amber-300 shadow-xs'
+                          : 'border-slate-200/80'
+                      }`}
+                    >
+                      {/* Top Header & Actions */}
+                      <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-3">
+                        <div className="min-w-0 space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="text-base font-extrabold text-slate-900 truncate">{seller.storeName}</h3>
+                            <span
+                              className={`px-2 py-0.5 rounded text-[11px] font-extrabold uppercase ${
+                                status === 'approved'
+                                  ? 'bg-emerald-50 text-[#2E7D32] border border-emerald-200'
+                                  : status === 'blocked'
+                                  ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                                  : 'bg-amber-50 text-amber-800 border border-amber-200'
+                              }`}
+                            >
+                              {status === 'approved' ? 'Approved' : status === 'blocked' ? 'Blocked' : 'Pending Approval'}
+                            </span>
+                            {hasRequestedPayout && (
+                              <span className="px-2 py-0.5 rounded bg-amber-500 text-white text-[10px] font-extrabold uppercase tracking-wide">
+                                Payout Requested: {formatINR(earnings.pendingPayout)}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-slate-600">
+                            Joined {new Date(seller.created_at).toLocaleDateString('en-IN')} ·{' '}
+                            <span className="font-semibold text-slate-800 tabular-nums">
+                              {sellerProductCount} listed product{sellerProductCount === 1 ? '' : 's'}
+                            </span>
+                          </p>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleSellerApprovalToggle(seller, 'approved')}
+                            disabled={status === 'approved'}
+                            className={`px-3 py-2 rounded-lg text-xs font-bold transition ${
+                              status === 'approved'
+                                ? 'bg-[#2E7D32] text-white cursor-default'
+                                : 'bg-emerald-50 text-[#2E7D32] hover:bg-emerald-100'
+                            }`}
+                          >
+                            <i className="fa-solid fa-circle-check mr-1"></i>
+                            {status === 'approved' ? 'Approved' : 'Approve Seller'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSellerApprovalToggle(seller, 'pending')}
+                            disabled={status === 'pending'}
+                            className={`px-3 py-2 rounded-lg text-xs font-bold transition ${
+                              status === 'pending'
+                                ? 'bg-amber-600 text-white cursor-default'
+                                : 'bg-amber-50 text-amber-800 hover:bg-amber-100'
+                            }`}
+                          >
+                            Pending
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSellerApprovalToggle(seller, 'blocked')}
+                            disabled={status === 'blocked'}
+                            className={`px-3 py-2 rounded-lg text-xs font-bold transition ${
+                              status === 'blocked'
+                                ? 'bg-rose-600 text-white cursor-default'
+                                : 'bg-rose-50 text-rose-600 hover:bg-rose-100'
+                            }`}
+                          >
+                            <i className="fa-solid fa-ban mr-1"></i>
+                            {status === 'blocked' ? 'Blocked' : 'Block Seller'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleMarkSellerPayoutPaid(seller, payoutActionAmount)}
+                            disabled={payoutActionAmount <= 0}
+                            className="px-3.5 py-2 rounded-lg bg-[#2874F0] text-white text-xs font-extrabold hover:bg-[#1e60d5] disabled:bg-slate-100 disabled:text-slate-400 disabled:cursor-not-allowed transition inline-flex items-center gap-1.5"
+                          >
+                            <i className="fa-solid fa-money-check-dollar"></i>
+                            <span>
+                              {payoutActionAmount > 0
+                                ? `Mark Payout Paid (${formatINR(payoutActionAmount)})`
+                                : 'Mark Payout Paid'}
+                            </span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* KYC & Payout Details Grid */}
+                      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-2.5 p-3.5 rounded-xl bg-slate-50 border border-slate-200/70 text-xs">
+                        <div>
+                          <p className="text-[10px] font-bold uppercase text-slate-400">Owner &amp; Contact</p>
+                          <p className="font-bold text-slate-900 mt-0.5">{seller.ownerName}</p>
+                          <p className="text-slate-600 truncate">{seller.email}</p>
+                          <p className="text-slate-600 font-mono">{seller.phone || 'No mobile'}</p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] font-bold uppercase text-slate-400">Pickup Address &amp; Pincode</p>
+                          <p className="text-slate-700 mt-0.5 leading-snug">
+                            {seller.pickupAddress || 'Not specified'}
+                          </p>
+                          {seller.pickupPincode && (
+                            <p className="mt-0.5 font-mono font-bold text-slate-800">
+                              PIN: {seller.pickupPincode}
+                            </p>
+                          )}
+                        </div>
+                        <div>
+                          <p className="text-[10px] font-bold uppercase text-slate-400">GSTIN / Tax KYC</p>
+                          <p className="font-mono font-bold text-slate-800 mt-0.5">
+                            {seller.gstOrPan || 'Not Provided'}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-[10px] font-bold uppercase text-slate-400">Bank Account / UPI ID</p>
+                          <p className="font-mono font-extrabold text-[#2874F0] mt-0.5 break-all">
+                            {seller.payoutAccount || 'Not Provided'}
+                          </p>
+                          {seller.lastPayoutPaidAt && (
+                            <p className="text-[10px] text-emerald-700 mt-0.5">
+                              Last paid: {new Date(seller.lastPayoutPaidAt).toLocaleDateString('en-IN')}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Seller Earnings & Pending Payout Strip */}
+                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 text-xs">
+                        <div className="rounded-lg border border-slate-200/80 px-3 py-2">
+                          <p className="text-[10px] font-semibold text-slate-500">Delivered Sales</p>
+                          <p className="font-mono font-extrabold text-slate-900 tabular-nums mt-0.5">
+                            {formatINR(earnings.grossDelivered)}
+                          </p>
+                        </div>
+                        <div className="rounded-lg border border-rose-100 bg-rose-50/40 px-3 py-2">
+                          <p className="text-[10px] font-semibold text-rose-700">Platform Fee (10%)</p>
+                          <p className="font-mono font-extrabold text-rose-700 tabular-nums mt-0.5">
+                            {formatINR(earnings.platformFee)}
+                          </p>
+                        </div>
+                        <div className="rounded-lg border border-emerald-100 bg-emerald-50/40 px-3 py-2">
+                          <p className="text-[10px] font-semibold text-[#2E7D32]">Net Earnings</p>
+                          <p className="font-mono font-extrabold text-[#2E7D32] tabular-nums mt-0.5">
+                            {formatINR(earnings.netEarnings)}
+                          </p>
+                        </div>
+                        <div className="rounded-lg border border-slate-200/80 px-3 py-2">
+                          <p className="text-[10px] font-semibold text-slate-500">Total Paid Out</p>
+                          <p className="font-mono font-extrabold text-slate-800 tabular-nums mt-0.5">
+                            {formatINR(earnings.totalPaidOut)}
+                          </p>
+                        </div>
+                        <div
+                          className={`rounded-lg border px-3 py-2 col-span-2 sm:col-span-1 ${
+                            hasRequestedPayout
+                              ? 'border-amber-300 bg-amber-50'
+                              : 'border-slate-200/80 bg-slate-50/60'
+                          }`}
+                        >
+                          <p
+                            className={`text-[10px] font-bold ${
+                              hasRequestedPayout ? 'text-amber-900' : 'text-slate-500'
+                            }`}
+                          >
+                            {hasRequestedPayout ? 'Pending Payout' : 'Unsettled Balance'}
+                          </p>
+                          <p
+                            className={`font-mono font-extrabold tabular-nums mt-0.5 ${
+                              hasRequestedPayout ? 'text-amber-900' : 'text-slate-900'
+                            }`}
+                          >
+                            {formatINR(payoutActionAmount)}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
@@ -869,21 +1559,27 @@ export const AdminView: React.FC<Props> = ({
 
       {/* Admin Mobile Bottom Nav */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-slate-200">
-        <div className="grid grid-cols-4 h-14 items-center">
+        <div className="grid grid-cols-5 h-14 items-center">
           {[
             { id: 'dashboard', label: 'Home', icon: 'fa-chart-pie' },
             { id: 'products', label: 'Products', icon: 'fa-boxes-stacked' },
             { id: 'orders', label: 'Orders', icon: 'fa-receipt' },
+            { id: 'sellers', label: 'Sellers', icon: 'fa-store' },
             { id: 'users', label: 'Users', icon: 'fa-users' },
           ].map((b) => (
             <button
               key={b.id}
               type="button"
               onClick={() => setAdminTab(b.id as AdminTab)}
-              className={`flex flex-col items-center justify-center h-full ${adminTab === b.id ? 'text-[#2874F0]' : 'text-slate-500'}`}
+              className={`relative flex flex-col items-center justify-center h-full ${adminTab === b.id ? 'text-[#2874F0]' : 'text-slate-500'}`}
             >
               <i className={`fa-solid ${b.icon} text-base`}></i>
               <span className="text-[10px] font-semibold mt-0.5">{b.label}</span>
+              {b.id === 'sellers' && sellerAttentionCount > 0 && (
+                <span className="absolute top-1.5 right-2 min-w-[15px] h-[15px] px-1 rounded-full bg-[#FB641B] text-white text-[9px] font-extrabold flex items-center justify-center tabular-nums">
+                  {sellerAttentionCount}
+                </span>
+              )}
             </button>
           ))}
         </div>
@@ -949,8 +1645,8 @@ export const AdminView: React.FC<Props> = ({
                   <input type="number" min="1" value={prodMrp} onChange={(e) => setProdMrp(e.target.value)} placeholder="Optional" className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-sm" />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Stock</label>
-                  <input type="number" min="0" value={prodStock} onChange={(e) => setProdStock(e.target.value)} required className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-sm" />
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Stock Quantity</label>
+                  <input type="number" min="0" value={prodStock} onChange={(e) => setProdStock(e.target.value)} required placeholder="0" className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-sm" />
                 </div>
               </div>
               <div>
@@ -1039,6 +1735,114 @@ export const AdminView: React.FC<Props> = ({
               >
                 {imageCompressing ? 'Processing Photo...' : 'Save Product'}
               </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Update Tracking Modal */}
+      {trackingModalOrder && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/55 backdrop-blur-xs">
+          <div className="w-full max-w-md rounded-t-2xl sm:rounded-2xl bg-white shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-extrabold text-slate-900">
+                  Update Tracking · <span className="font-mono">#{trackingModalOrder.id}</span>
+                </h2>
+                <p className="text-[11px] text-slate-500 truncate">
+                  {trackingModalOrder.name} · {formatINR(trackingModalOrder.total_amount)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setTrackingModalOrder(null)}
+                aria-label="Close tracking modal"
+                className="w-8 h-8 rounded-lg text-slate-500 hover:bg-slate-100 flex items-center justify-center"
+              >
+                <i className="fa-solid fa-xmark"></i>
+              </button>
+            </div>
+            <form
+              onSubmit={(e) => handleSaveOrderTracking(trackingModalOrder, e)}
+              className="p-5 space-y-3.5"
+            >
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Order Status</label>
+                <select
+                  value={orderStatusDraft}
+                  onChange={(e) => setOrderStatusDraft(e.target.value as OrderStatus)}
+                  className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-sm font-semibold text-slate-900"
+                >
+                  {ORDER_STATUS_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Courier Partner</label>
+                  <select
+                    value={trackingCourierDraft}
+                    onChange={(e) => setTrackingCourierDraft(e.target.value)}
+                    className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-xs font-semibold text-slate-900"
+                  >
+                    {COURIER_PARTNERS.map((partner) => (
+                      <option key={partner} value={partner}>
+                        {partner}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">AWB / Tracking ID</label>
+                  <input
+                    type="text"
+                    value={trackingIdDraft}
+                    onChange={(e) => setTrackingIdDraft(e.target.value)}
+                    placeholder="e.g. DLV948271630IN"
+                    className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-xs font-mono text-slate-900"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Live Location / Hub Note</label>
+                <input
+                  type="text"
+                  value={trackingNoteDraft}
+                  onChange={(e) => setTrackingNoteDraft(e.target.value)}
+                  placeholder="Dispatched from Bawana Warehouse, Delhi"
+                  className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-900"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Custom Tracking URL <span className="text-slate-400 font-normal">(optional)</span>
+                </label>
+                <input
+                  type="text"
+                  value={trackingUrlDraft}
+                  onChange={(e) => setTrackingUrlDraft(e.target.value)}
+                  placeholder="Auto-links to courier page if left blank"
+                  className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-900"
+                />
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setTrackingModalOrder(null)}
+                  className="px-4 py-2.5 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2.5 rounded-xl bg-[#2874F0] text-white text-xs font-bold hover:bg-[#1e60d5] transition"
+                >
+                  Save Live Tracking
+                </button>
+              </div>
             </form>
           </div>
         </div>
