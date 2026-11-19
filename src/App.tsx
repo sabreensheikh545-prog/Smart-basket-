@@ -1771,24 +1771,98 @@ export default function App() {
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1.5">Delivery Address</label>
                   <textarea rows={3} value={checkoutAddress} onChange={(e) => setCheckoutAddress(e.target.value)} required placeholder="House No, Street, City, Pincode" className="w-full p-3.5 rounded-lg bg-slate-50 border border-slate-200 text-sm" />
+                              </div>
+
+              <div className="space-y-3">
+                <label className="block text-xs font-semibold text-slate-700">Payment Method</label>
+                <div className="grid grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setPaymentMethod('UPI')}
+                    className={`p-3 rounded-xl border-2 text-left transition ${
+                      paymentMethod === 'UPI' ? 'border-[#2874F0] bg-blue-50/60' : 'border-slate-200 bg-white'
+                    }`}
+                  >
+                    <p className="text-xs font-bold text-slate-900">Direct UPI / QR</p>
+                    <p className="text-[11px] text-slate-500 mt-0.5">Instant Pay & UTR</p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPaymentMethod('Cash on Delivery')}
+                    className={`p-3 rounded-xl border-2 text-left transition ${
+                      paymentMethod === 'Cash on Delivery' ? 'border-[#2874F0] bg-blue-50/60' : 'border-slate-200 bg-white'
+                    }`}
+                  >
+                    <p className="text-xs font-bold text-slate-900">Cash on Delivery</p>
+                    <p className="text-[11px] text-slate-500 mt-0.5">Pay at doorstep</p>
+                  </button>
                 </div>
-                <div className="p-4 rounded-xl border-2 border-[#2874F0] bg-blue-50/50 flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <span className="w-10 h-10 rounded-lg bg-[#2874F0] text-white flex items-center justify-center">
-                      <i className="fa-solid fa-money-bill-wave"></i>
-                    </span>
-                    <div>
-                      <p className="text-sm font-bold text-slate-900">Cash on Delivery (COD)</p>
-                      <p className="text-xs text-slate-500">Pay {formatINR(cartTotal)} upon delivery</p>
+
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-1 text-xs">
+                  <div className="flex justify-between text-slate-600">
+                    <span>Subtotal</span>
+                    <span>{formatINR(cartTotal)}</span>
+                  </div>
+                  <div className="flex justify-between text-slate-600">
+                    <span>GST (Seller: {STORE_GSTIN})</span>
+                    <span>{formatINR(cartGstTotal)}</span>
+                  </div>
+                  <div className="flex justify-between font-bold text-slate-900 pt-1 border-t border-slate-200">
+                    <span>Total Payable</span>
+                    <span>{formatINR(grandTotal)}</span>
+                  </div>
+                </div>
+
+                {paymentMethod === 'UPI' && (
+                  <div className="p-3.5 rounded-xl border border-blue-200 bg-blue-50/40 space-y-3 text-center">
+                    <p className="text-xs font-bold text-slate-800">
+                      Scan QR or Pay to <span className="text-[#2874F0]">{STORE_UPI_ID}</span>
+                    </p>
+                    <img
+                      src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(
+                        `upi://pay?pa=${STORE_UPI_ID}&pn=Smart%20Basket&am=${grandTotal}&cu=INR`
+                      )}`}
+                      alt="UPI QR Code"
+                      className="w-36 h-36 mx-auto rounded-lg bg-white p-1.5 border border-slate-200"
+                    />
+                    <a
+                      href={`upi://pay?pa=${STORE_UPI_ID}&pn=Smart%20Basket&am=${grandTotal}&cu=INR`}
+                      className="inline-flex items-center justify-center gap-2 w-full py-2 rounded-lg bg-[#2874F0] text-white text-xs font-bold"
+                    >
+                      <i className="fa-solid fa-up-right-from-square"></i>
+                      <span>Open UPI App ({formatINR(grandTotal)})</span>
+                    </a>
+                    <div className="text-left">
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                        Enter 12-Digit UTR / Reference Number *
+                      </label>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={12}
+                        value={utrNumber}
+                        onChange={(e) => setUtrNumber(e.target.value.replace(/\D/g, ''))}
+                        placeholder="e.g. 412345678901"
+                        className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm font-mono tracking-wider"
+                      />
                     </div>
                   </div>
-                  <i className="fa-solid fa-circle-check text-[#2874F0] text-lg"></i>
-                </div>
-                <button type="submit" className="w-full h-12 rounded-lg bg-[#FB641B] text-white text-sm font-bold hover:bg-[#e55812] transition flex items-center justify-center gap-2">
-                  <i className="fa-solid fa-check"></i>
-                  <span>Confirm COD Order</span>
-                </button>
-              </form>
+                )}
+              </div>
+
+              <button
+                type="submit"
+                className="w-full h-12 rounded-lg bg-[#FB641B] text-white font-bold text-sm flex items-center justify-center gap-2 shadow-sm"
+              >
+                <i className="fa-solid fa-check"></i>
+                <span>
+                  {paymentMethod === 'UPI'
+                    ? `Verify UTR & Place Order (${formatINR(grandTotal)})`
+                    : `Confirm COD Order (${formatINR(grandTotal)})`}
+                </span>
+              </button>
+            </form>
+              
             </main>
           )}
 
