@@ -44,6 +44,7 @@ import {
 } from './types';
 
 type UserPage = 'home' | 'shop' | 'detail' | 'cart' | 'checkout' | 'orders' | 'profile' | 'login';
+const RAZORPAY_KEY_ID = 'rzp_test_1DP5mmOlF5G5ag'; // Live KYC होते ही यहाँ अपनी rzp_live_... Key डालें
 
 interface ModalConfig {
   open: boolean;
@@ -665,39 +666,67 @@ export default function App() {
       });
       return;
     }   
-    if (paymentMethod === 'UPI' && !/^\d{12}$/.test(utrNumber.trim())) {
-      showModal({
-        title: 'Invalid UTR Number',
-        message: 'Please enter the exact 12-digit UPI UTR / Reference number after paying.',
-        type: 'error',
+        const completeOrderPlacement = async (finalPaymentMethod: string, paymentId?: string) => {
+      showLoader('Placing order...');
+      const res = await placeOrderFirestore({
+        userId: currentUser.uid || auth.currentUser?.uid || String(currentUser.id),
+        numericUserId: currentUser.id,
+        name: checkoutName,
+        phone: checkoutPhone,
+        email: currentUser.email || auth.currentUser?.email || '',
+        address: checkoutAddress,
+        paymentMethod: finalPaymentMethod,
+        utrNumber: paymentId || '',
+        items: cart.map((c) => ({ product: c.product, quantity: c.quantity })),
       });
+      hideLoader();
+      if (res.success) {
+        saveCart([]);
+        setCart([]);
+        setOrderTab('active');
+        setPage('orders');
+        showModal({ title: 'Order Confirmed', message: res.message, type: 'success' });
+      } else {
+        showModal({ title: 'Checkout Error', message: res.message, type: 'error' });
+      }
+    };
+
+    if (paymentMethod === 'UPI') {
+      const RazorpayCtor = (window as unknown as { Razorpay?: new (opts: Record<string, unknown>) => { open: () => void } }).Razorpay;
+      if (!RazorpayCtor) {
+        showModal({
+          title: 'Payment Gateway Loading',
+          message: 'Please check your internet connection and try again.',
+          type: 'error',
+        });
+        return;
+      }
+
+      const options = {
+        key: RAZORPAY_KEY_ID,
+        amount: Math.round(grandTotal * 100),
+        currency: 'INR',
+        name: 'Smart Basket',
+        description: `Order Payment (${cartCount} items)`,
+        prefill: {
+          name: checkoutName,
+          email: currentUser.email || '',
+          contact: checkoutPhone,
+        },
+        theme: { color: '#2874F0' },
+        handler: async (response: { razorpay_payment_id: string }) => {
+          await completeOrderPlacement('Online (Razorpay)', response.razorpay_payment_id);
+        },
+      };
+
+      const rzp = new RazorpayCtor(options);
+      rzp.open();
       return;
     }
-    
-    showLoader('Placing order...');
-    const res = await placeOrderFirestore({
-      userId: currentUser.uid || auth.currentUser?.uid || String(currentUser.id),
-      numericUserId: currentUser.id,
-      name: checkoutName,
-      phone: checkoutPhone,
-      email: currentUser.email || auth.currentUser?.email || '',
-      address: checkoutAddress,
-      paymentMethod: paymentMethod === 'UPI' ? `UPI (${STORE_UPI_ID})` : 'Cash on Delivery',
-      
-      items: cart.map((c) => ({ product: c.product, quantity: c.quantity })),
-    });
-    hideLoader();
-    if (res.success) {
-      saveCart([]);
-      setCart([]);
-      setOrderTab('active');
-      setPage('orders');
-      showModal({ title: 'Order Confirmed', message: res.message, type: 'success' });
-    } else {
-      showModal({ title: 'Checkout Error', message: res.message, type: 'error' });
-    }
-  };
 
+    await completeOrderPlacement('Cash on Delivery');
+  };
+  
   const handleCancelOrder = (ord: Order) => {
     showModal({
       title: `Cancel Order #${ord.id}`,
@@ -1813,39 +1842,15 @@ export default function App() {
                   </div>
                 </div>
 
-                {paymentMethod === 'UPI' && (
-                  <div className="p-3.5 rounded-xl border border-blue-200 bg-blue-50/40 space-y-3 text-center">
-                    <p className="text-xs font-bold text-slate-800">
-                      Scan QR or Pay to <span className="text-[#2874F0]">{STORE_UPI_ID}</span>
+                               {paymentMethod === 'UPI' && (
+                  <div className="p-3.5 rounded-xl border border-blue-200 bg-blue-50/40 space-y-1.5 text-left">
+                    <p className="text-xs font-bold text-slate-900 flex items-center gap-2">
+                      <i className="fa-solid fa-shield-halved text-[#2874F0]"></i>
+                      <span>100% Secure Instant Payment (Razorpay)</span>
                     </p>
-                    <img
-                      src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(
-                        `upi://pay?pa=${STORE_UPI_ID}&pn=Smart%20Basket&am=${grandTotal}&cu=INR`
-                      )}`}
-                      alt="UPI QR Code"
-                      className="w-36 h-36 mx-auto rounded-lg bg-white p-1.5 border border-slate-200"
-                    />
-                    <a
-                      href={`upi://pay?pa=${STORE_UPI_ID}&pn=Smart%20Basket&am=${grandTotal}&cu=INR`}
-                      className="inline-flex items-center justify-center gap-2 w-full py-2 rounded-lg bg-[#2874F0] text-white text-xs font-bold"
-                    >
-                      <i className="fa-solid fa-up-right-from-square"></i>
-                      <span>Open UPI App ({formatINR(grandTotal)})</span>
-                    </a>
-                    <div className="text-left">
-                      <label className="block text-[11px] font-bold text-slate-700 mb-1">
-                        Enter 12-Digit UTR / Reference Number *
-                      </label>
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        maxLength={12}
-                        value={utrNumber}
-                        onChange={(e) => setUtrNumber(e.target.value.replace(/\D/g, ''))}
-                        placeholder="e.g. 412345678901"
-                        className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-sm font-mono tracking-wider"
-                      />
-                    </div>
+                    <p className="text-[11px] text-slate-600">
+                      Pay directly via GPay, PhonePe, Paytm, UPI, Credit/Debit Card or NetBanking. Order confirms automatically!
+                    </p>
                   </div>
                 )}
               </div>
@@ -1854,13 +1859,14 @@ export default function App() {
                 type="submit"
                 className="w-full h-12 rounded-lg bg-[#FB641B] text-white font-bold text-sm flex items-center justify-center gap-2 shadow-sm"
               >
-                <i className="fa-solid fa-check"></i>
+                <i className="fa-solid fa-lock"></i>
                 <span>
                   {paymentMethod === 'UPI'
-                    ? `Verify UTR & Place Order (${formatINR(grandTotal)})`
+                    ? `Pay Now (${formatINR(grandTotal)})`
                     : `Confirm COD Order (${formatINR(grandTotal)})`}
                 </span>
               </button>
+            
             </form>
               
             </main>
