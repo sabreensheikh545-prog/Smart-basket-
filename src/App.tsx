@@ -196,7 +196,8 @@ export default function App() {
     const lineParts = [saved.houseStreet, saved.area, saved.city, saved.state].filter(Boolean);
     return `${lineParts.join(', ')}${saved.pincode ? ` - ${saved.pincode}` : ''}`;
   });
-
+  const [paymentMethod, setPaymentMethod] = useState<'Online Payment' | 'Cash on Delivery'>('Online Payment');
+  
   // Orders View, Return/Replace Request & Legal Policy Modals
   const [orderTab, setOrderTab] = useState<'active' | 'history'>('active');
   const [expandedOrderIds, setExpandedOrderIds] = useState<number[]>([]);
@@ -1270,45 +1271,76 @@ export default function App() {
       quantity: Math.max(1, Math.floor(Number(c.quantity) || 1)),
     }));
 
-    showLoader('Placing order...');
-    const res = await placeOrderFirestore({
-      userId: currentUser.uid || auth.currentUser?.uid || String(currentUser.id),
-      numericUserId: currentUser.id,
-      name: checkoutName,
-      phone: checkoutPhone,
-      email: currentUser.email || auth.currentUser?.email || '',
-      address: checkoutAddress,
-      paymentMethod: 'Cash on Delivery',
-      platformFee: checkoutPlatformFee,
-      couponCode: appliedCouponCode || '',
-      couponDiscount: checkoutCouponDiscount,
-      items: normalizedCart.map((c) => ({ product: c.product, quantity: c.quantity })),
-    });
-    hideLoader();
-    if (res.success) {
-      // Immediately reflect deducted product stock in UI state
-      const qtyByProductId = new Map<number, number>();
-      orderedQuantities.forEach((item) => {
-        qtyByProductId.set(item.productId, (qtyByProductId.get(item.productId) || 0) + item.quantity);
+        const finalizeOrder = async (methodLabel: string) => {
+      showLoader('Placing order...');
+      const res = await placeOrderFirestore({
+        userId: currentUser.uid || auth.currentUser?.uid || String(currentUser.id),
+        numericUserId: currentUser.id,
+        name: checkoutName,
+        phone: checkoutPhone,
+        email: currentUser.email || auth.currentUser?.email || '',
+        address: checkoutAddress,
+        paymentMethod: methodLabel,
+        platformFee: checkoutPlatformFee,
+        couponCode: appliedCouponCode || '',
+        couponDiscount: checkoutCouponDiscount,
+        items: normalizedCart.map((c) => ({ product: c.product, quantity: c.quantity })),
       });
-      setProducts((prev) =>
-        prev.map((p) => {
-          const deduct = qtyByProductId.get(p.id);
-          if (!deduct) return p;
-          return { ...p, stock: Math.max(0, Math.floor(Number(p.stock) || 0) - deduct) };
-        })
-      );
-      saveCart([]);
-      setCart([]);
-      setAppliedCouponCode('');
-      setOrderTab('active');
-      setPage('orders');
-      showModal({ title: 'Order Confirmed', message: res.message, type: 'success' });
-    } else {
-      showModal({ title: 'Checkout Error', message: res.message, type: 'error' });
-    }
-  };
+      hideLoader();
+      if (res.success) {
+        const qtyByProductId = new Map<number, number>();
+        orderedQuantities.forEach((item) => {
+          qtyByProductId.set(item.productId, (qtyByProductId.get(item.productId) || 0) + item.quantity);
+        });
+        setProducts((prev) =>
+          prev.map((p) => {
+            const deduct = qtyByProductId.get(p.id);
+            if (!deduct) return p;
+            return { ...p, stock: Math.max(0, Math.floor(Number(p.stock) - deduct)) };
+          })
+        );
+        saveCart([]);
+        setCart([]);
+        setAppliedCouponCode('');
+        setOrderTab('active');
+        setPage('orders');
+        showModal({ title: 'Order Confirmed', message: res.message, type: 'success' });
+      } else {
+        showModal({ title: 'Checkout Error', message: res.message, type: 'error' });
+      }
+    };
 
+    if (paymentMethod === 'Cash on Delivery') {
+      await finalizeOrder('Cash on Delivery');
+      return;
+    }
+
+    const RazorpayConstructor = (window as unknown as { Razorpay?: new (opts: Record<string, unknown>) => { open: () => void } }).Razorpay;
+    if (!RazorpayConstructor) {
+      showModal({ title: 'Payment Unavailable', message: 'Razorpay SDK failed to load. Please check internet or select Cash on Delivery.', type: 'error' });
+      return;
+    }
+
+    const rzp = new RazorpayConstructor({
+      key: 'rzp_live_U1t08rrhb6TEXG',
+      amount: Math.round(checkoutPayableTotal * 100),
+      currency: 'INR',
+      name: 'Smart Basket',
+      description: 'Order Payment',
+      prefill: {
+        name: checkoutName,
+        contact: checkoutPhone,
+        email: currentUser.email || auth.currentUser?.email || '',
+      },
+      theme: { color: '#2874F0' },
+      handler: async (response: { razorpay_payment_id?: string }) => {
+        const payId = response?.razorpay_payment_id ? ` (${response.razorpay_payment_id})` : '';
+        await finalizeOrder(`Online Paid${payId}`);
+      },
+    });
+    rzp.open();
+  };
+  
   const handleCancelOrder = (ord: Order) => {
     showModal({
       title: `Cancel Order #${ord.id}`,
@@ -3426,9 +3458,33 @@ export default function App() {
                     className="w-full p-3.5 rounded-lg bg-slate-50 border border-slate-200 text-sm"
                   />
                 </div>
-                <div className="p-4 rounded-xl border-2 border-[#2874F0] bg-blue-50/50 flex items-center justify-between">
+                              <div className="space-y-2.5">
+                <div
+                  onClick={() => setPaymentMethod('Online Payment')}
+                  className={`p-4 rounded-xl border-2 cursor-pointer flex items-center justify-between transition ${
+                    paymentMethod === 'Online Payment' ? 'border-[#2874F0] bg-blue-50/50' : 'border-slate-200 bg-white'
+                  }`}
+                >
                   <div className="flex items-center gap-3">
                     <span className="w-10 h-10 rounded-lg bg-[#2874F0] text-white flex items-center justify-center">
+                      <i className="fa-solid fa-credit-card"></i>
+                    </span>
+                    <div>
+                      <p className="text-sm font-bold text-slate-900">Pay Online (UPI / Card / Netbanking)</p>
+                      <p className="text-xs text-slate-500">Instant payment via Razorpay</p>
+                    </div>
+                  </div>
+                  <i className={`fa-solid ${paymentMethod === 'Online Payment' ? 'fa-circle-check text-[#2874F0]' : 'fa-circle text-slate-300'} text-lg`}></i>
+                </div>
+
+                <div
+                  onClick={() => setPaymentMethod('Cash on Delivery')}
+                  className={`p-4 rounded-xl border-2 cursor-pointer flex items-center justify-between transition ${
+                    paymentMethod === 'Cash on Delivery' ? 'border-[#2874F0] bg-blue-50/50' : 'border-slate-200 bg-white'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="w-10 h-10 rounded-lg bg-emerald-600 text-white flex items-center justify-center">
                       <i className="fa-solid fa-money-bill-wave"></i>
                     </span>
                     <div>
@@ -3436,15 +3492,18 @@ export default function App() {
                       <p className="text-xs text-slate-500">Pay {formatINR(checkoutPayableTotal)} upon delivery</p>
                     </div>
                   </div>
-                  <i className="fa-solid fa-circle-check text-[#2874F0] text-lg"></i>
+                  <i className={`fa-solid ${paymentMethod === 'Cash on Delivery' ? 'fa-circle-check text-[#2874F0]' : 'fa-circle text-slate-300'} text-lg`}></i>
                 </div>
-                <button
-                  type="submit"
-                  className="w-full h-12 rounded-lg bg-[#FB641B] text-white text-sm font-bold hover:bg-[#e55812] transition flex items-center justify-center gap-2"
-                >
-                  <i className="fa-solid fa-check"></i>
-                  <span>Confirm Order ({formatINR(checkoutPayableTotal)})</span>
-                </button>
+              </div>
+
+              <button
+                type="submit"
+                className="w-full h-12 rounded-lg bg-[#FB641B] text-white text-sm font-bold hover:bg-[#e85a12] transition flex items-center justify-center gap-2 shadow-sm"
+              >
+                <i className="fa-solid fa-check"></i>
+                <span>{paymentMethod === 'Online Payment' ? `Pay ${formatINR(checkoutPayableTotal)} Online` : `Confirm Order (${formatINR(checkoutPayableTotal)})`}</span>
+              </button>
+                
               </form>
             </main>
           )}
