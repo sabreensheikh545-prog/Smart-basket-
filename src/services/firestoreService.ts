@@ -3,6 +3,7 @@ import {
   deleteDoc,
   doc,
   getDoc,
+  getDocs,
   onSnapshot,
   query,
   setDoc,
@@ -16,9 +17,30 @@ import {
   DEFAULT_PRODUCTS,
   cacheCategoriesLocal,
   cacheProductsLocal,
+  cacheSellersLocal,
+  deductProductStockLocal,
+  getSellerByEmailOrUidLocal,
+  getStoredSellersLocal,
+  markSellerPayoutPaidLocal,
+  requestOrderReturnLocal,
+  requestSellerPayoutLocal,
   resolveAssetImage,
+  saveSellerProfileLocal,
+  updateOrderStatusLocal,
+  updateOrderTrackingLocal,
+  updateSellerStatusLocal,
 } from '../store/localStore';
-import { Category, Order, OrderItem, Product, User } from '../types';
+import {
+  Category,
+  Order,
+  OrderItem,
+  OrderStatus,
+  Product,
+  SellerPayoutRecord,
+  SellerProfile,
+  User,
+  normalizeSellerStatus,
+} from '../types';
 
 let productsSeedAttempted = false;
 let categoriesSeedAttempted = false;
@@ -60,6 +82,9 @@ function mapProductDoc(id: string, data: Record<string, unknown>): Product {
     stock: Number(data.stock ?? 0),
     image: resolveAssetImage(typeof data.image === 'string' ? data.image : ''),
     created_at: String(data.created_at || data.createdAt || new Date().toISOString()),
+    sellerId: typeof data.sellerId === 'string' ? data.sellerId : undefined,
+    sellerEmail: typeof data.sellerEmail === 'string' ? data.sellerEmail.trim().toLowerCase() : undefined,
+    sellerName: typeof data.sellerName === 'string' ? data.sellerName : undefined,
   };
 }
 
@@ -77,15 +102,37 @@ function mapOrderDoc(id: string, data: Record<string, unknown>): Order {
       product_image: resolveAssetImage(typeof it.product_image === 'string' ? it.product_image : ''),
       quantity: Number(it.quantity || 1),
       price: Number(it.price || 0),
+      sellerId: typeof it.sellerId === 'string' ? it.sellerId : undefined,
+      sellerEmail: typeof it.sellerEmail === 'string' ? it.sellerEmail.trim().toLowerCase() : undefined,
+      sellerName: typeof it.sellerName === 'string' ? it.sellerName : undefined,
     };
   });
 
   const totalAmount = Number(data.total_amount ?? data.total ?? 0);
-  const rawStatus = String(data.status || 'Placed');
-  const validStatus: Order['status'] =
-    rawStatus === 'Dispatched' || rawStatus === 'Delivered' || rawStatus === 'Cancelled'
-      ? rawStatus
-      : 'Placed';
+  const rawStatus = String(data.status || 'Confirmed');
+  const validStatuses: OrderStatus[] = [
+    'Placed',
+    'Confirmed',
+    'Packed',
+    'Shipped',
+    'Dispatched',
+    'Out for Delivery',
+    'Delivered',
+    'Return Requested',
+    'Return Approved',
+    'Refunded',
+    'Cancelled',
+  ];
+  const validStatus: OrderStatus = validStatuses.includes(rawStatus as OrderStatus)
+    ? (rawStatus as OrderStatus)
+    : 'Confirmed';
+
+  const sellerIds = Array.isArray(data.sellerIds)
+    ? data.sellerIds.filter((v): v is string => typeof v === 'string')
+    : undefined;
+  const sellerEmails = Array.isArray(data.sellerEmails)
+    ? data.sellerEmails.filter((v): v is string => typeof v === 'string').map((e) => e.trim().toLowerCase())
+    : undefined;
 
   return {
     id: orderNumericId,
@@ -98,14 +145,27 @@ function mapOrderDoc(id: string, data: Record<string, unknown>): Order {
     address: String(data.address || ''),
     total_amount: totalAmount,
     total: totalAmount,
+    platformFee: data.platformFee !== undefined ? Number(data.platformFee) : undefined,
+    couponCode: typeof data.couponCode === 'string' ? data.couponCode : undefined,
+    couponDiscount: data.couponDiscount !== undefined ? Number(data.couponDiscount) : undefined,
     paymentMethod: String(data.paymentMethod || 'Cash on Delivery'),
     status: validStatus,
+    courierName: typeof data.courierName === 'string' && data.courierName.trim() ? data.courierName.trim() : undefined,
+    trackingId: typeof data.trackingId === 'string' && data.trackingId.trim() ? data.trackingId.trim() : undefined,
+    trackingUrl: typeof data.trackingUrl === 'string' && data.trackingUrl.trim() ? data.trackingUrl.trim() : undefined,
+    trackingNote: typeof data.trackingNote === 'string' && data.trackingNote.trim() ? data.trackingNote.trim() : undefined,
+    returnReason: typeof data.returnReason === 'string' && data.returnReason.trim() ? data.returnReason.trim() : undefined,
+    returnResolution: data.returnResolution === 'Replace' ? 'Replace' : data.returnResolution === 'Return' ? 'Return' : undefined,
+    returnRequestedAt: typeof data.returnRequestedAt === 'string' ? data.returnRequestedAt : undefined,
     created_at: String(data.created_at || data.createdAt || new Date().toISOString()),
     items,
+    sellerIds,
+    sellerEmails,
   };
 }
 
 function mapUserDoc(id: string, data: Record<string, unknown>): User {
+  const roleVal = data.role === 'admin' || data.role === 'seller' || data.role === 'customer' ? data.role : undefined;
   return {
     id: typeof data.id === 'number' ? data.id : stableNumericId(id),
     uid: typeof data.uid === 'string' ? data.uid : id,
@@ -115,6 +175,50 @@ function mapUserDoc(id: string, data: Record<string, unknown>): User {
     email: String(data.email || ''),
     address: String(data.address || ''),
     status: data.status === 'blocked' ? 'blocked' : 'active',
+    created_at: String(data.created_at || data.createdAt || new Date().toISOString()),
+    role: roleVal,
+    isSeller: Boolean(data.isSeller || roleVal === 'seller'),
+    sellerStoreName: typeof data.sellerStoreName === 'string' ? data.sellerStoreName : undefined,
+  };
+}
+
+function mapSellerDoc(id: string, data: Record<string, unknown>): SellerProfile {
+  const status = normalizeSellerStatus(typeof data.status === 'string' ? data.status : 'pending');
+  const rawHistory = Array.isArray(data.payoutHistory) ? data.payoutHistory : [];
+  const payoutHistory: SellerPayoutRecord[] = rawHistory
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+    .map((item, idx) => ({
+      id: typeof item.id === 'string' ? item.id : `po_${idx}`,
+      amount: Number(item.amount || 0),
+      payoutAccount: String(item.payoutAccount || ''),
+      status: item.status === 'paid' ? 'paid' : 'requested',
+      requestedAt: String(item.requestedAt || new Date().toISOString()),
+      paidAt: typeof item.paidAt === 'string' ? item.paidAt : undefined,
+    }));
+
+  const rawPayoutStatus = String(data.payoutStatus || 'none');
+  const payoutStatus: SellerProfile['payoutStatus'] =
+    rawPayoutStatus === 'requested' || rawPayoutStatus === 'paid' ? rawPayoutStatus : 'none';
+
+  return {
+    id: typeof data.id === 'string' ? data.id : id,
+    uid: typeof data.uid === 'string' ? data.uid : id,
+    docId: id,
+    email: String(data.email || '').trim().toLowerCase(),
+    storeName: String(data.storeName || 'Seller Store'),
+    ownerName: String(data.ownerName || 'Seller'),
+    phone: String(data.phone || ''),
+    gstOrPan: typeof data.gstOrPan === 'string' ? data.gstOrPan : '',
+    pickupAddress: String(data.pickupAddress || ''),
+    pickupPincode: typeof data.pickupPincode === 'string' ? data.pickupPincode : '',
+    payoutAccount: typeof data.payoutAccount === 'string' ? data.payoutAccount : '',
+    totalPaidOut: Number(data.totalPaidOut || 0),
+    pendingPayoutAmount: Number(data.pendingPayoutAmount || 0),
+    payoutStatus,
+    payoutRequestedAt: typeof data.payoutRequestedAt === 'string' ? data.payoutRequestedAt : undefined,
+    lastPayoutPaidAt: typeof data.lastPayoutPaidAt === 'string' ? data.lastPayoutPaidAt : undefined,
+    payoutHistory,
+    status,
     created_at: String(data.created_at || data.createdAt || new Date().toISOString()),
   };
 }
@@ -273,6 +377,9 @@ export async function saveProductFirestore(payload: {
   stock: number;
   image: string;
   created_at?: string;
+  sellerId?: string;
+  sellerEmail?: string;
+  sellerName?: string;
 }): Promise<{ success: boolean; message: string }> {
   const cleanName = payload.name.trim();
   if (!cleanName || payload.price <= 0) {
@@ -288,25 +395,27 @@ export async function saveProductFirestore(payload: {
         : Math.round((payload.price * 1.35) / 10) * 10 - 1;
     const nowIso = new Date().toISOString();
 
-    await setDoc(
-      doc(db, 'products', docId),
-      {
-        id: numericId,
-        cat_id: payload.cat_id,
-        name: cleanName,
-        description: payload.description.trim(),
-        price: payload.price,
-        mrp: mrpValue,
-        rating: payload.rating || 4.4,
-        reviews: payload.reviews || 120,
-        stock: Math.max(0, Math.floor(payload.stock)),
-        image: payload.image,
-        created_at: payload.created_at || nowIso,
-        createdAt: payload.created_at || nowIso,
-        updatedAt: nowIso,
-      },
-      { merge: true }
-    );
+    const docPayload: Record<string, unknown> = {
+      id: numericId,
+      cat_id: payload.cat_id,
+      name: cleanName,
+      description: payload.description.trim(),
+      price: payload.price,
+      mrp: mrpValue,
+      rating: payload.rating || 4.4,
+      reviews: payload.reviews || 120,
+      stock: Math.max(0, Math.floor(payload.stock)),
+      image: payload.image,
+      created_at: payload.created_at || nowIso,
+      createdAt: payload.created_at || nowIso,
+      updatedAt: nowIso,
+    };
+
+    if (payload.sellerId) docPayload.sellerId = payload.sellerId;
+    if (payload.sellerEmail) docPayload.sellerEmail = payload.sellerEmail.trim().toLowerCase();
+    if (payload.sellerName) docPayload.sellerName = payload.sellerName.trim();
+
+    await setDoc(doc(db, 'products', docId), docPayload, { merge: true });
     return { success: true, message: isEdit ? 'Product updated.' : 'Product added.' };
   } catch (err) {
     return { success: false, message: getFirestoreErrorMessage(err) };
@@ -368,7 +477,15 @@ export async function syncUserProfileFirestore(payload: {
         : new Date().toISOString();
     const nowIso = new Date().toISOString();
 
-    const docData = {
+    const existingRole =
+      existingData?.role === 'admin' || existingData?.role === 'seller' || existingData?.role === 'customer'
+        ? existingData.role
+        : undefined;
+    const existingIsSeller = Boolean(existingData?.isSeller || existingRole === 'seller');
+    const existingStoreName =
+      typeof existingData?.sellerStoreName === 'string' ? existingData.sellerStoreName : undefined;
+
+    const docData: Record<string, unknown> = {
       id: numericId,
       uid: payload.uid,
       name: finalName,
@@ -380,6 +497,9 @@ export async function syncUserProfileFirestore(payload: {
       createdAt,
       updatedAt: nowIso,
     };
+    if (existingRole) docData.role = existingRole;
+    if (existingIsSeller) docData.isSeller = true;
+    if (existingStoreName) docData.sellerStoreName = existingStoreName;
 
     await setDoc(userRef, docData, { merge: true });
 
@@ -393,6 +513,9 @@ export async function syncUserProfileFirestore(payload: {
       address: finalAddress,
       status: 'active',
       created_at: createdAt,
+      role: existingRole,
+      isSeller: existingIsSeller,
+      sellerStoreName: existingStoreName,
     };
 
     return { success: true, message: 'Profile synced.', user };
@@ -489,11 +612,9 @@ export async function placeOrderFirestore(payload: {
   email: string;
   address: string;
   paymentMethod?: string;
-  utr_number?: string;
-  subtotal_amount?: number;
-  gst_amount?: number;
-  total_amount?: number;
-  seller_gstin?: string;
+  platformFee?: number;
+  couponCode?: string;
+  couponDiscount?: number;
   items: { product: Product; quantity: number }[];
 }): Promise<{ success: boolean; message: string; order?: Order }> {
   if (!payload.name.trim() || !payload.phone.trim() || !payload.address.trim() || payload.items.length === 0) {
@@ -510,16 +631,12 @@ export async function placeOrderFirestore(payload: {
     const orderNumber = Math.floor(100000 + (Date.now() % 900000));
     const nowIso = new Date().toISOString();
     let subtotal = 0;
-    let totalGst = 0;
 
     const orderItems: OrderItem[] = payload.items.map((entry, idx) => {
-      const qty = Math.max(1, entry.quantity);
-      const gstRate = entry.product.gst_rate ?? 0;
-      const itemSub = entry.product.price * qty;
-      const itemGst = Math.round((itemSub * gstRate) / 100);
-      subtotal += itemSub;
-      totalGst += itemGst;
-      return {
+      const qty = Math.max(1, Number(entry.quantity) || 1);
+      const unitPrice = Number(entry.product.price) || 0;
+      subtotal += unitPrice * qty;
+      const item: OrderItem = {
         id: idx + 1,
         order_id: orderNumber,
         product_id: entry.product.id,
@@ -527,14 +644,25 @@ export async function placeOrderFirestore(payload: {
         product_name: entry.product.name,
         product_image: entry.product.image,
         quantity: qty,
-        price: entry.product.price,
-        gst_rate: gstRate,
+        price: unitPrice,
       };
+      if (entry.product.sellerId) item.sellerId = entry.product.sellerId;
+      if (entry.product.sellerEmail) item.sellerEmail = entry.product.sellerEmail.trim().toLowerCase();
+      if (entry.product.sellerName) item.sellerName = entry.product.sellerName;
+      return item;
     });
 
-    const finalSub = payload.subtotal_amount ?? subtotal;
-    const finalGst = payload.gst_amount ?? totalGst;
-    const total = payload.total_amount ?? finalSub + finalGst;
+    const platformFee = Math.max(0, Number(payload.platformFee ?? 10));
+    const couponDiscount = Math.max(0, Number(payload.couponDiscount ?? 0));
+    const total = Math.max(0, subtotal - couponDiscount + platformFee);
+
+    const sellerIds = Array.from(
+      new Set(orderItems.map((it) => it.sellerId).filter((v): v is string => Boolean(v)))
+    );
+    const sellerEmails = Array.from(
+      new Set(orderItems.map((it) => it.sellerEmail?.trim().toLowerCase()).filter((v): v is string => Boolean(v)))
+    );
+
     const paymentMethod = payload.paymentMethod || 'Cash on Delivery';
     const orderDocRef = doc(collection(db, 'orders'));
 
@@ -548,31 +676,63 @@ export async function placeOrderFirestore(payload: {
       email: payload.email.trim().toLowerCase(),
       address: payload.address.trim(),
       items: orderItems,
-      subtotal_amount: finalSub,
-      gst_amount: finalGst,
+      sellerIds,
+      sellerEmails,
+      platformFee,
+      couponCode: payload.couponCode || '',
+      couponDiscount,
       total,
       total_amount: total,
       paymentMethod,
-      utr_number: payload.utr_number?.trim() || '',
-      payment_verified: false,
-      seller_gstin: payload.seller_gstin || '07AABCS1429B1Z5',
-      status: 'Placed' as const,
+      status: 'Confirmed' as const,
       createdAt: nowIso,
       created_at: nowIso,
     };
-        
 
     await setDoc(orderDocRef, orderPayload);
 
-    // Best-effort product stock decrement and saved address update
+    // Immediately deduct stock locally so UI & offline cache update right away
+    deductProductStockLocal(
+      payload.items.map((entry) => ({
+        product_id: entry.product.id,
+        quantity: Math.max(1, Math.floor(Number(entry.quantity) || 1)),
+      }))
+    );
+
+    // Deduct stock in Firestore (reads latest stock when available to stay accurate under concurrent orders)
     await Promise.allSettled(
-      payload.items.map((entry) => {
+      payload.items.map(async (entry) => {
         const prodDocId = entry.product.docId || String(entry.product.id);
-        const nextStock = Math.max(0, entry.product.stock - Math.max(1, entry.quantity));
-        return updateDoc(doc(db, 'products', prodDocId), {
-          stock: nextStock,
-          updatedAt: nowIso,
-        });
+        const qty = Math.max(1, Math.floor(Number(entry.quantity) || 1));
+        const prodRef = doc(db, 'products', prodDocId);
+        let baseStock = Number(entry.product.stock ?? 0);
+        try {
+          const latestSnap = await getDoc(prodRef);
+          if (latestSnap.exists()) {
+            const latestData = latestSnap.data() as Record<string, unknown>;
+            if (typeof latestData.stock === 'number' && Number.isFinite(latestData.stock)) {
+              baseStock = latestData.stock;
+            }
+          }
+        } catch {
+          // Use known client stock if pre-read fails
+        }
+        const nextStock = Math.max(0, Math.floor(baseStock) - qty);
+        try {
+          await updateDoc(prodRef, {
+            stock: nextStock,
+            updatedAt: nowIso,
+          });
+        } catch {
+          await setDoc(
+            prodRef,
+            {
+              stock: nextStock,
+              updatedAt: nowIso,
+            },
+            { merge: true }
+          );
+        }
       })
     );
 
@@ -645,8 +805,12 @@ export async function updateOrderStatusFirestore(
   order: Order,
   status: Order['status']
 ): Promise<{ success: boolean; message: string }> {
+  // Always sync localStore immediately as well
+  updateOrderStatusLocal(order.id, status);
   const docId = order.docId;
-  if (!docId) return { success: false, message: 'Order document ID missing.' };
+  if (!docId) {
+    return { success: true, message: `Order #${order.id} updated to ${status}.` };
+  }
   try {
     await updateDoc(doc(db, 'orders', docId), {
       status,
@@ -658,11 +822,506 @@ export async function updateOrderStatusFirestore(
   }
 }
 
+export async function updateOrderTrackingFirestore(
+  order: Order,
+  payload: {
+    status: OrderStatus;
+    courierName?: string;
+    trackingId?: string;
+    trackingUrl?: string;
+    trackingNote?: string;
+  }
+): Promise<{ success: boolean; message: string }> {
+  const cleanCourier = (payload.courierName || '').trim();
+  const cleanTrackingId = (payload.trackingId || '').trim();
+  const cleanTrackingUrl = (payload.trackingUrl || '').trim();
+  const cleanTrackingNote = (payload.trackingNote || '').trim();
+
+  // Always sync localStore immediately
+  updateOrderTrackingLocal(order.id, {
+    status: payload.status,
+    courierName: cleanCourier,
+    trackingId: cleanTrackingId,
+    trackingUrl: cleanTrackingUrl,
+    trackingNote: cleanTrackingNote,
+  });
+
+  const docId = order.docId;
+  if (!docId) {
+    return { success: true, message: `Live tracking updated for Order #${order.id}.` };
+  }
+  try {
+    await updateDoc(doc(db, 'orders', docId), {
+      status: payload.status,
+      courierName: cleanCourier,
+      trackingId: cleanTrackingId,
+      trackingUrl: cleanTrackingUrl,
+      trackingNote: cleanTrackingNote,
+      updatedAt: new Date().toISOString(),
+    });
+    return { success: true, message: `Live tracking updated for Order #${order.id}.` };
+  } catch (err) {
+    return { success: false, message: getFirestoreErrorMessage(err) };
+  }
+}
+
+export async function requestOrderReturnFirestore(
+  order: Order,
+  payload: {
+    returnReason: string;
+    returnResolution?: 'Return' | 'Replace';
+  }
+): Promise<{ success: boolean; message: string }> {
+  const cleanReason = payload.returnReason.trim();
+  if (!cleanReason) {
+    return { success: false, message: 'Please select a reason for your return or replacement request.' };
+  }
+  const resolution = payload.returnResolution || 'Return';
+  const nowIso = new Date().toISOString();
+
+  // Always update localStore immediately
+  requestOrderReturnLocal(order.id, {
+    returnReason: cleanReason,
+    returnResolution: resolution,
+  });
+
+  const docId = order.docId;
+  if (!docId) {
+    return {
+      success: true,
+      message: `${resolution} request submitted for Order #${order.id}. Our team will review it within 24 hours.`,
+    };
+  }
+  try {
+    await updateDoc(doc(db, 'orders', docId), {
+      status: 'Return Requested',
+      returnReason: cleanReason,
+      returnResolution: resolution,
+      returnRequestedAt: nowIso,
+      updatedAt: nowIso,
+    });
+    return {
+      success: true,
+      message: `${resolution} request submitted for Order #${order.id}. Our team will review it within 24 hours.`,
+    };
+  } catch (err) {
+    return {
+      success: true,
+      message: `${resolution} request saved locally for Order #${order.id} (${getFirestoreErrorMessage(err)}).`,
+    };
+  }
+}
+
 export async function cancelOrderFirestore(order: Order): Promise<{ success: boolean; message: string }> {
-  if (order.status !== 'Placed') {
-    return { success: false, message: 'Only newly placed orders can be cancelled.' };
+  if (order.status !== 'Placed' && order.status !== 'Confirmed') {
+    return { success: false, message: 'Only newly confirmed orders can be cancelled.' };
   }
   const res = await updateOrderStatusFirestore(order, 'Cancelled');
   if (!res.success) return res;
   return { success: true, message: `Order #${order.id} cancelled.` };
+}
+
+export function subscribeAllSellersFirestore(
+  onData: (sellers: SellerProfile[]) => void,
+  onError?: (message: string) => void
+): () => void {
+  const mergeWithLocal = (fsSellers: SellerProfile[]) => {
+    const localList = getStoredSellersLocal();
+    const byKey = new Map<string, SellerProfile>();
+    localList.forEach((s) => {
+      const k = (s.docId || s.uid || s.email || s.id).toLowerCase();
+      byKey.set(k, { ...s, status: normalizeSellerStatus(s.status) });
+    });
+    fsSellers.forEach((s) => {
+      const k = (s.docId || s.uid || s.email || s.id).toLowerCase();
+      byKey.set(k, { ...s, status: normalizeSellerStatus(s.status) });
+    });
+    const merged = Array.from(byKey.values()).sort(
+      (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
+    cacheSellersLocal(merged);
+    return merged;
+  };
+
+  // Emit local sellers immediately so UI is responsive even before snapshot arrives
+  const initialLocal = getStoredSellersLocal();
+  if (initialLocal.length > 0) {
+    onData(initialLocal);
+  }
+
+  return onSnapshot(
+    collection(db, 'sellers'),
+    (snapshot) => {
+      const fsList = snapshot.docs.map((d) => mapSellerDoc(d.id, d.data() as Record<string, unknown>));
+      onData(mergeWithLocal(fsList));
+    },
+    (err) => {
+      onData(getStoredSellersLocal());
+      onError?.(getFirestoreErrorMessage(err));
+    }
+  );
+}
+
+export async function updateSellerStatusFirestore(
+  seller: SellerProfile,
+  status: 'approved' | 'pending' | 'blocked'
+): Promise<{ success: boolean; message: string }> {
+  const identifier = seller.docId || seller.uid || seller.id || seller.email;
+  updateSellerStatusLocal(identifier, status);
+
+  const docId = seller.docId || seller.uid || seller.id;
+  if (!docId) {
+    return { success: true, message: `${seller.storeName} marked as ${status}.` };
+  }
+  try {
+    await setDoc(
+      doc(db, 'sellers', docId),
+      {
+        status,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+    return {
+      success: true,
+      message: `${seller.storeName} is now ${status === 'approved' ? 'Approved' : status === 'blocked' ? 'Blocked' : 'Pending'}.`,
+    };
+  } catch {
+    return {
+      success: true,
+      message: `${seller.storeName} status updated to ${status} locally.`,
+    };
+  }
+}
+
+export async function getSellerProfileFirestore(
+  uid?: string,
+  email?: string
+): Promise<SellerProfile | null> {
+  const cleanEmail = (email || '').trim().toLowerCase();
+  const cleanUid = (uid || '').trim();
+  if (!cleanUid && !cleanEmail) return null;
+
+  try {
+    if (cleanUid) {
+      const snap = await getDoc(doc(db, 'sellers', cleanUid));
+      if (snap.exists()) {
+        const mapped = mapSellerDoc(snap.id, snap.data() as Record<string, unknown>);
+        saveSellerProfileLocal(mapped);
+        return mapped;
+      }
+    }
+    if (cleanEmail) {
+      const q = query(collection(db, 'sellers'), where('email', '==', cleanEmail));
+      const snap = await getDocs(q);
+      if (!snap.empty) {
+        const first = snap.docs[0];
+        const mapped = mapSellerDoc(first.id, first.data() as Record<string, unknown>);
+        saveSellerProfileLocal(mapped);
+        return mapped;
+      }
+    }
+  } catch {
+    // Gracefully fall back to localStore if Firestore rules restrict sellers collection
+  }
+
+  return getSellerByEmailOrUidLocal(cleanEmail, cleanUid);
+}
+
+export function subscribeSellerProfileFirestore(
+  uid: string | undefined,
+  email: string | undefined,
+  onData: (seller: SellerProfile | null) => void
+): () => void {
+  const cleanEmail = (email || '').trim().toLowerCase();
+  const cleanUid = (uid || '').trim();
+  if (!cleanUid && !cleanEmail) {
+    onData(null);
+    return () => {};
+  }
+
+  const localInitial = getSellerByEmailOrUidLocal(cleanEmail, cleanUid);
+  if (localInitial) {
+    onData(localInitial);
+  }
+
+  if (cleanUid) {
+    return onSnapshot(
+      doc(db, 'sellers', cleanUid),
+      (snap) => {
+        if (snap.exists()) {
+          const mapped = mapSellerDoc(snap.id, snap.data() as Record<string, unknown>);
+          saveSellerProfileLocal(mapped);
+          onData(mapped);
+        } else {
+          onData(getSellerByEmailOrUidLocal(cleanEmail, cleanUid));
+        }
+      },
+      () => {
+        onData(getSellerByEmailOrUidLocal(cleanEmail, cleanUid));
+      }
+    );
+  }
+
+  const q = query(collection(db, 'sellers'), where('email', '==', cleanEmail));
+  return onSnapshot(
+    q,
+    (snap) => {
+      if (!snap.empty) {
+        const first = snap.docs[0];
+        const mapped = mapSellerDoc(first.id, first.data() as Record<string, unknown>);
+        saveSellerProfileLocal(mapped);
+        onData(mapped);
+      } else {
+        onData(getSellerByEmailOrUidLocal(cleanEmail, cleanUid));
+      }
+    },
+    () => {
+      onData(getSellerByEmailOrUidLocal(cleanEmail, cleanUid));
+    }
+  );
+}
+
+export async function registerOrUpdateSellerFirestore(payload: {
+  uid?: string;
+  email: string;
+  storeName: string;
+  ownerName: string;
+  phone: string;
+  gstOrPan?: string;
+  pickupAddress: string;
+  pickupPincode?: string;
+  payoutAccount: string;
+}): Promise<{ success: boolean; message: string; seller?: SellerProfile }> {
+  const cleanEmail = payload.email.trim().toLowerCase();
+  const cleanStore = payload.storeName.trim();
+  const cleanOwner = payload.ownerName.trim();
+  const cleanPhone = payload.phone.replace(/\D/g, '').slice(-10) || payload.phone.trim();
+  const cleanAddress = payload.pickupAddress.trim();
+  const cleanPincode = (payload.pickupPincode || '').replace(/\D/g, '').slice(0, 6);
+  const cleanPayoutAccount = (payload.payoutAccount || '').trim();
+
+  if (!cleanEmail || cleanStore.length < 2) {
+    return { success: false, message: 'Please enter a valid Store / Business Name and email.' };
+  }
+  if (cleanOwner.length < 2) {
+    return { success: false, message: 'Please enter the Owner Full Name.' };
+  }
+  if (cleanPhone.length < 10) {
+    return { success: false, message: 'Please enter a valid 10-digit Mobile Number.' };
+  }
+  if (cleanAddress.length < 5) {
+    return { success: false, message: 'Please enter your complete Pickup Address.' };
+  }
+  if (cleanPincode.length !== 6) {
+    return { success: false, message: 'Please enter a valid 6-digit Pickup Pincode.' };
+  }
+  if (cleanPayoutAccount.length < 3) {
+    return { success: false, message: 'Please enter a valid Bank Account or UPI ID for payouts.' };
+  }
+
+  const docId = payload.uid || cleanEmail.replace(/[^a-z0-9]/g, '_');
+  const nowIso = new Date().toISOString();
+
+  // Preserve existing approval status if updating profile; default new sellers to 'pending'
+  const existingLocal = getSellerByEmailOrUidLocal(cleanEmail, payload.uid);
+  const resolvedStatus = existingLocal ? normalizeSellerStatus(existingLocal.status) : 'pending';
+
+  // Always save locally first so seller onboarding works offline or under strict Firestore rules
+  const localRes = saveSellerProfileLocal({
+    id: docId,
+    uid: payload.uid,
+    docId,
+    email: cleanEmail,
+    storeName: cleanStore,
+    ownerName: cleanOwner,
+    phone: cleanPhone,
+    gstOrPan: payload.gstOrPan?.trim() || '',
+    pickupAddress: cleanAddress,
+    pickupPincode: cleanPincode,
+    payoutAccount: cleanPayoutAccount,
+    status: resolvedStatus,
+  });
+
+  try {
+    const existingSnap = await getDoc(doc(db, 'sellers', docId)).catch(() => null);
+    const fsStatus =
+      existingSnap && existingSnap.exists()
+        ? normalizeSellerStatus(String((existingSnap.data() as Record<string, unknown>).status || resolvedStatus))
+        : resolvedStatus;
+
+    await setDoc(
+      doc(db, 'sellers', docId),
+      {
+        id: docId,
+        uid: payload.uid || docId,
+        email: cleanEmail,
+        storeName: cleanStore,
+        ownerName: cleanOwner,
+        phone: cleanPhone,
+        gstOrPan: payload.gstOrPan?.trim() || '',
+        pickupAddress: cleanAddress,
+        pickupPincode: cleanPincode,
+        payoutAccount: cleanPayoutAccount,
+        totalPaidOut: localRes.seller?.totalPaidOut ?? 0,
+        pendingPayoutAmount: localRes.seller?.pendingPayoutAmount ?? 0,
+        payoutStatus: localRes.seller?.payoutStatus ?? 'none',
+        payoutHistory: localRes.seller?.payoutHistory ?? [],
+        status: fsStatus,
+        created_at: localRes.seller?.created_at || nowIso,
+        createdAt: localRes.seller?.created_at || nowIso,
+        updatedAt: nowIso,
+      },
+      { merge: true }
+    );
+
+    if (localRes.seller && localRes.seller.status !== fsStatus) {
+      updateSellerStatusLocal(docId, fsStatus);
+      localRes.seller = { ...localRes.seller, status: fsStatus };
+    }
+
+    if (payload.uid) {
+      await setDoc(
+        doc(db, 'users', payload.uid),
+        {
+          isSeller: true,
+          role: 'seller',
+          sellerStoreName: cleanStore,
+          updatedAt: nowIso,
+        },
+        { merge: true }
+      ).catch(() => {});
+    }
+  } catch {
+    // Already persisted in localStore; keep UX seamless
+  }
+
+  return localRes;
+}
+
+export async function requestSellerPayoutFirestore(
+  seller: SellerProfile,
+  amount: number,
+  payoutAccount: string
+): Promise<{ success: boolean; message: string; seller?: SellerProfile }> {
+  const identifier = seller.docId || seller.uid || seller.id || seller.email;
+  const localRes = requestSellerPayoutLocal(identifier, amount, payoutAccount);
+  if (!localRes.success || !localRes.seller) {
+    return localRes;
+  }
+
+  const docId = seller.docId || seller.uid || seller.id;
+  if (!docId) return localRes;
+
+  try {
+    await setDoc(
+      doc(db, 'sellers', docId),
+      {
+        payoutAccount: localRes.seller.payoutAccount,
+        pendingPayoutAmount: localRes.seller.pendingPayoutAmount ?? 0,
+        payoutStatus: 'requested',
+        payoutRequestedAt: localRes.seller.payoutRequestedAt,
+        payoutHistory: localRes.seller.payoutHistory ?? [],
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+  } catch {
+    // Already persisted in localStore; keep UX seamless
+  }
+
+  return localRes;
+}
+
+export async function markSellerPayoutPaidFirestore(
+  seller: SellerProfile,
+  amountOverride?: number
+): Promise<{ success: boolean; message: string; seller?: SellerProfile; paidAmount?: number }> {
+  const identifier = seller.docId || seller.uid || seller.id || seller.email;
+  const localRes = markSellerPayoutPaidLocal(identifier, amountOverride);
+  if (!localRes.success || !localRes.seller) {
+    return localRes;
+  }
+
+  const docId = seller.docId || seller.uid || seller.id;
+  if (!docId) return localRes;
+
+  try {
+    await setDoc(
+      doc(db, 'sellers', docId),
+      {
+        totalPaidOut: localRes.seller.totalPaidOut ?? 0,
+        pendingPayoutAmount: 0,
+        payoutStatus: 'paid',
+        lastPayoutPaidAt: localRes.seller.lastPayoutPaidAt,
+        payoutHistory: localRes.seller.payoutHistory ?? [],
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+  } catch {
+    // Already persisted in localStore; keep UX seamless
+  }
+
+  return localRes;
+}
+
+export function filterOrderForSeller(
+  ord: Order,
+  sellerId: string,
+  sellerEmail: string,
+  sellerProductIds: Set<number>
+): Order | null {
+  const cleanEmail = sellerEmail.trim().toLowerCase();
+  const cleanId = sellerId.trim();
+
+  const ownItems = ord.items.filter((it) => {
+    if (it.sellerEmail && cleanEmail && it.sellerEmail.trim().toLowerCase() === cleanEmail) return true;
+    if (it.sellerId && cleanId && it.sellerId === cleanId) return true;
+    if (sellerProductIds.has(it.product_id)) return true;
+    return false;
+  });
+
+  if (ownItems.length === 0) return null;
+
+  const sellerTotal = ownItems.reduce((sum, it) => sum + it.price * it.quantity, 0);
+  return {
+    ...ord,
+    items: ownItems,
+    total_amount: sellerTotal,
+    total: sellerTotal,
+  };
+}
+
+export function subscribeSellerOrdersFirestore(
+  sellerId: string,
+  sellerEmail: string,
+  sellerProductIds: number[],
+  onData: (orders: Order[]) => void,
+  onError?: (message: string) => void
+): () => void {
+  const cleanEmail = sellerEmail.trim().toLowerCase();
+  const prodIdSet = new Set(sellerProductIds);
+
+  // Query orders tagged with this seller's email first; if security rules allow collection scan, also catch legacy items
+  const ordersQuery = cleanEmail
+    ? query(collection(db, 'orders'), where('sellerEmails', 'array-contains', cleanEmail))
+    : collection(db, 'orders');
+
+  return onSnapshot(
+    ordersQuery,
+    (snapshot) => {
+      const scopedOrders: Order[] = [];
+      snapshot.docs.forEach((d) => {
+        const mapped = mapOrderDoc(d.id, d.data() as Record<string, unknown>);
+        const filtered = filterOrderForSeller(mapped, sellerId, cleanEmail, prodIdSet);
+        if (filtered) scopedOrders.push(filtered);
+      });
+      scopedOrders.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      onData(scopedOrders);
+    },
+    (err) => {
+      onError?.(getFirestoreErrorMessage(err));
+    }
+  );
 }
