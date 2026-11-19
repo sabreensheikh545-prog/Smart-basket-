@@ -40,6 +40,8 @@ jobs:
           }
           EOF
           npx cap add android
+          sed -i 's|<uses-permission android:name="android.permission.INTERNET" />|<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />|' android/app/src/main/AndroidManifest.xml
+          
           npm install @capacitor/assets --save-dev --legacy-peer-deps
           npx capacitor-assets generate --android
           npx cap sync
