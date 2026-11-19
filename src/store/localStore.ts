@@ -10,7 +10,7 @@ import homeApplianceImg from '../assets/images/product_home_appliance_1794941059
 import beautyImg from '../assets/images/product_beauty_skincare_1794941060127.jpg';
 import groceryImg from '../assets/images/product_grocery_pack_1794941061136.jpg';
 import bigSavingBannerImg from '../assets/images/banner_big_saving_1794941061121.jpg';
-import { CartEntry, Category, Order, Product, User } from '../types';
+import { CartEntry, Category, Order, Product, SavedAddress, SellerPayoutRecord, SellerProfile, User, normalizeSellerStatus } from '../types';
 
 export const ASSETS = {
   smartphone: smartphoneImg,
@@ -60,6 +60,10 @@ const KEYS = {
   currentUser: 'qk_current_user_v3',
   adminCreds: 'qk_admin_creds_v3',
   adminLoggedIn: 'qk_admin_logged_in_v3',
+  sellers: 'qk_sellers_v3',
+  currentSeller: 'qk_current_seller_v3',
+  wishlist: 'qk_wishlist_v3',
+  savedAddress: 'qk_saved_address_v3',
 };
 
 export function resolveAssetImage(imageValue?: string): string {
@@ -272,7 +276,10 @@ const DEFAULT_ORDERS: Order[] = [
     phone: '9876543210',
     address: '402 Indiranagar 100ft Road, Bengaluru, Karnataka 560038',
     total_amount: 1399,
-    status: 'Dispatched',
+    status: 'Shipped',
+    courierName: 'Delhivery',
+    trackingId: 'DLV948271630IN',
+    trackingNote: 'Dispatched from Bawana Warehouse, Delhi',
     created_at: '2026-11-15T14:20:00Z',
     items: [
       {
@@ -435,6 +442,9 @@ export function syncFirebaseCustomerLocal(payload: {
   phone?: string;
   address?: string;
   status?: 'active' | 'blocked';
+  role?: User['role'];
+  isSeller?: boolean;
+  sellerStoreName?: string;
 }): { success: boolean; message: string; user?: User } {
   ensureSeeded();
   const cleanEmail = payload.email.trim().toLowerCase();
@@ -466,6 +476,9 @@ export function syncFirebaseCustomerLocal(payload: {
       phone: cleanPhone || found.phone || '',
       address: cleanAddress || found.address || '',
       status: effectiveStatus,
+      role: payload.role ?? found.role,
+      isSeller: payload.isSeller ?? found.isSeller,
+      sellerStoreName: payload.sellerStoreName ?? found.sellerStoreName,
     };
     users[existingIdx] = updatedUser;
     writeJSON(KEYS.users, users);
@@ -485,6 +498,9 @@ export function syncFirebaseCustomerLocal(payload: {
     password: '',
     address: cleanAddress,
     status: payload.status || 'active',
+    role: payload.role,
+    isSeller: payload.isSeller,
+    sellerStoreName: payload.sellerStoreName,
     created_at: new Date().toISOString(),
   };
   writeJSON(KEYS.users, [newUser, ...users]);
@@ -616,8 +632,16 @@ export function placeOrderLocal(payload: {
       product_image: prod.image,
       quantity: qty,
       price: prod.price,
+      sellerId: prod.sellerId,
+      sellerEmail: prod.sellerEmail,
+      sellerName: prod.sellerName,
     });
   }
+
+  const sellerIds = Array.from(new Set(orderItems.map((it) => it.sellerId).filter((v): v is string => Boolean(v))));
+  const sellerEmails = Array.from(
+    new Set(orderItems.map((it) => it.sellerEmail?.trim().toLowerCase()).filter((v): v is string => Boolean(v)))
+  );
 
   const newOrder: Order = {
     id: nextOrderId,
@@ -629,6 +653,8 @@ export function placeOrderLocal(payload: {
     status: 'Placed',
     created_at: new Date().toISOString(),
     items: orderItems,
+    sellerIds,
+    sellerEmails,
   };
 
   writeJSON(KEYS.products, products);
@@ -649,8 +675,8 @@ export function placeOrderLocal(payload: {
 export function cancelOrderLocal(orderId: number, userId: number): { success: boolean; message: string } {
   const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
   const ord = orders.find((o) => o.id === orderId && o.user_id === userId);
-  if (!ord || ord.status !== 'Placed') {
-    return { success: false, message: 'Only newly placed orders can be cancelled.' };
+  if (!ord || (ord.status !== 'Placed' && ord.status !== 'Confirmed')) {
+    return { success: false, message: 'Only newly confirmed orders can be cancelled.' };
   }
   ord.status = 'Cancelled';
   writeJSON(KEYS.orders, orders);
@@ -705,7 +731,10 @@ export function saveProductLocal(payload: {
   rating?: number;
   stock: number;
   image: string;
-}): { success: boolean; message: string } {
+  sellerId?: string;
+  sellerEmail?: string;
+  sellerName?: string;
+}): { success: boolean; message: string; product?: Product } {
   if (!payload.name.trim() || payload.price <= 0) {
     return { success: false, message: 'Valid product name and price required.' };
   }
@@ -724,8 +753,12 @@ export function saveProductLocal(payload: {
         rating: payload.rating || products[idx].rating || 4.4,
         stock: payload.stock,
         image: payload.image || products[idx].image,
+        sellerId: payload.sellerId ?? products[idx].sellerId,
+        sellerEmail: payload.sellerEmail ?? products[idx].sellerEmail,
+        sellerName: payload.sellerName ?? products[idx].sellerName,
       };
       writeJSON(KEYS.products, products);
+      return { success: true, message: 'Product updated.', product: products[idx] };
     }
     return { success: true, message: 'Product updated.' };
   }
@@ -742,14 +775,38 @@ export function saveProductLocal(payload: {
     stock: payload.stock,
     image: payload.image || earbudsImg,
     created_at: new Date().toISOString(),
+    sellerId: payload.sellerId,
+    sellerEmail: payload.sellerEmail?.trim().toLowerCase(),
+    sellerName: payload.sellerName,
   };
   writeJSON(KEYS.products, [newProd, ...products]);
-  return { success: true, message: 'Product added.' };
+  return { success: true, message: 'Product added.', product: newProd };
 }
 
 export function deleteProductLocal(id: number): void {
   const products = readJSON<Product[]>(KEYS.products, DEFAULT_PRODUCTS).filter((p) => p.id !== id);
   writeJSON(KEYS.products, products);
+}
+
+export function deductProductStockLocal(
+  items: { product_id: number; quantity: number }[]
+): Product[] {
+  const products = readJSON<Product[]>(KEYS.products, DEFAULT_PRODUCTS);
+  const qtyById = new Map<number, number>();
+  items.forEach((it) => {
+    const qty = Math.max(1, Math.floor(Number(it.quantity) || 1));
+    qtyById.set(it.product_id, (qtyById.get(it.product_id) || 0) + qty);
+  });
+  const updated = products.map((prod) => {
+    const deduct = qtyById.get(prod.id);
+    if (!deduct) return prod;
+    return {
+      ...prod,
+      stock: Math.max(0, Math.floor(Number(prod.stock) || 0) - deduct),
+    };
+  });
+  writeJSON(KEYS.products, updated);
+  return updated;
 }
 
 export function updateOrderStatusLocal(orderId: number, status: Order['status']): { success: boolean; message: string } {
@@ -759,6 +816,50 @@ export function updateOrderStatusLocal(orderId: number, status: Order['status'])
   ord.status = status;
   writeJSON(KEYS.orders, orders);
   return { success: true, message: `Order #${ord.id} updated to ${status}.` };
+}
+
+export function updateOrderTrackingLocal(
+  orderId: number,
+  payload: {
+    status: Order['status'];
+    courierName?: string;
+    trackingId?: string;
+    trackingUrl?: string;
+    trackingNote?: string;
+  }
+): { success: boolean; message: string; order?: Order } {
+  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  const ord = orders.find((o) => o.id === orderId);
+  if (!ord) return { success: false, message: 'Order not found locally.' };
+  ord.status = payload.status;
+  ord.courierName = (payload.courierName || '').trim() || undefined;
+  ord.trackingId = (payload.trackingId || '').trim() || undefined;
+  ord.trackingUrl = (payload.trackingUrl || '').trim() || undefined;
+  ord.trackingNote = (payload.trackingNote || '').trim() || undefined;
+  writeJSON(KEYS.orders, orders);
+  return { success: true, message: `Tracking updated for Order #${ord.id}.`, order: ord };
+}
+
+export function requestOrderReturnLocal(
+  orderId: number,
+  payload: {
+    returnReason: string;
+    returnResolution?: 'Return' | 'Replace';
+  }
+): { success: boolean; message: string; order?: Order } {
+  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  const ord = orders.find((o) => o.id === orderId);
+  if (!ord) return { success: false, message: 'Order not found locally.' };
+  ord.status = 'Return Requested';
+  ord.returnReason = payload.returnReason.trim();
+  ord.returnResolution = payload.returnResolution || 'Return';
+  ord.returnRequestedAt = new Date().toISOString();
+  writeJSON(KEYS.orders, orders);
+  return {
+    success: true,
+    message: `Your ${ord.returnResolution.toLowerCase()} request for Order #${ord.id} has been submitted.`,
+    order: ord,
+  };
 }
 
 export function toggleUserBlockLocal(userId: number, status: 'active' | 'blocked'): void {
@@ -786,4 +887,375 @@ export function updateAdminSettingsLocal(username: string, newPassword: string):
   }
   writeJSON(KEYS.adminCreds, creds);
   return { success: true, message: 'Admin settings updated.' };
+}
+
+export function getStoredSellersLocal(): SellerProfile[] {
+  return readJSON<SellerProfile[]>(KEYS.sellers, []).map((s) => ({
+    ...s,
+    status: normalizeSellerStatus(s.status),
+  }));
+}
+
+export function cacheSellersLocal(sellers: SellerProfile[]): void {
+  const existing = getStoredSellersLocal();
+  const byKey = new Map<string, SellerProfile>();
+  existing.forEach((s) => {
+    const key = (s.docId || s.uid || s.email || s.id).toLowerCase();
+    byKey.set(key, { ...s, status: normalizeSellerStatus(s.status) });
+  });
+  sellers.forEach((s) => {
+    const key = (s.docId || s.uid || s.email || s.id).toLowerCase();
+    byKey.set(key, { ...s, status: normalizeSellerStatus(s.status) });
+  });
+  writeJSON(KEYS.sellers, Array.from(byKey.values()));
+}
+
+export function updateSellerStatusLocal(
+  sellerIdentifier: string,
+  status: 'approved' | 'pending' | 'blocked'
+): { success: boolean; message: string; seller?: SellerProfile } {
+  const cleanId = sellerIdentifier.trim().toLowerCase();
+  const sellers = getStoredSellersLocal();
+  const idx = sellers.findIndex(
+    (s) =>
+      s.id.toLowerCase() === cleanId ||
+      (s.uid && s.uid.toLowerCase() === cleanId) ||
+      (s.docId && s.docId.toLowerCase() === cleanId) ||
+      s.email.trim().toLowerCase() === cleanId
+  );
+  if (idx === -1) {
+    return { success: false, message: 'Seller not found.' };
+  }
+  sellers[idx] = { ...sellers[idx], status };
+  writeJSON(KEYS.sellers, sellers);
+
+  const cur = getStoredCurrentSeller();
+  if (
+    cur &&
+    (cur.id.toLowerCase() === cleanId ||
+      (cur.uid && cur.uid.toLowerCase() === cleanId) ||
+      cur.email.trim().toLowerCase() === cleanId)
+  ) {
+    setStoredCurrentSeller(sellers[idx]);
+  }
+  return { success: true, message: `Seller status updated to ${status}.`, seller: sellers[idx] };
+}
+
+export function getStoredCurrentSeller(): SellerProfile | null {
+  const cur = readJSON<SellerProfile | null>(KEYS.currentSeller, null);
+  return cur ? { ...cur, status: normalizeSellerStatus(cur.status) } : null;
+}
+
+export function setStoredCurrentSeller(seller: SellerProfile | null): void {
+  writeJSON(KEYS.currentSeller, seller);
+}
+
+export function getWishlistIdsLocal(): number[] {
+  return readJSON<number[]>(KEYS.wishlist, []);
+}
+
+export function saveWishlistIdsLocal(ids: number[]): void {
+  writeJSON(KEYS.wishlist, ids);
+}
+
+export function getSavedAddressLocal(): SavedAddress | null {
+  return readJSON<SavedAddress | null>(KEYS.savedAddress, null);
+}
+
+export function saveStructuredAddressLocal(addr: SavedAddress): void {
+  writeJSON(KEYS.savedAddress, addr);
+}
+
+export function getSellerByEmailOrUidLocal(email?: string, uid?: string): SellerProfile | null {
+  const cleanEmail = (email || '').trim().toLowerCase();
+  const cleanUid = (uid || '').trim();
+  if (!cleanEmail && !cleanUid) return null;
+  const sellers = getStoredSellersLocal();
+  return (
+    sellers.find(
+      (s) =>
+        (cleanUid && (s.uid === cleanUid || s.id === cleanUid)) ||
+        (cleanEmail && s.email.trim().toLowerCase() === cleanEmail)
+    ) || null
+  );
+}
+
+export function saveSellerProfileLocal(payload: {
+  id?: string;
+  uid?: string;
+  docId?: string;
+  email: string;
+  storeName: string;
+  ownerName: string;
+  phone: string;
+  gstOrPan?: string;
+  pickupAddress: string;
+  pickupPincode?: string;
+  payoutAccount?: string;
+  totalPaidOut?: number;
+  pendingPayoutAmount?: number;
+  payoutStatus?: SellerProfile['payoutStatus'];
+  payoutRequestedAt?: string;
+  lastPayoutPaidAt?: string;
+  payoutHistory?: SellerPayoutRecord[];
+  status?: SellerProfile['status'];
+  created_at?: string;
+}): { success: boolean; message: string; seller?: SellerProfile } {
+  const cleanEmail = payload.email.trim().toLowerCase();
+  const cleanStore = payload.storeName.trim();
+  const cleanOwner = payload.ownerName.trim();
+  const cleanPhone = payload.phone.replace(/\D/g, '').slice(-10) || payload.phone.trim();
+  const cleanAddress = payload.pickupAddress.trim();
+  const cleanPincode = (payload.pickupPincode || '').replace(/\D/g, '').slice(0, 6);
+  const cleanPayoutAccount = (payload.payoutAccount || '').trim();
+
+  if (!cleanEmail || !cleanStore || cleanStore.length < 2) {
+    return { success: false, message: 'Store name and valid email are required.' };
+  }
+  if (!cleanOwner || cleanOwner.length < 2) {
+    return { success: false, message: 'Owner name is required.' };
+  }
+  if (!cleanAddress || cleanAddress.length < 5) {
+    return { success: false, message: 'Pickup address is required.' };
+  }
+
+  const sellers = getStoredSellersLocal();
+  const existingIdx = sellers.findIndex(
+    (s) =>
+      (payload.uid && s.uid === payload.uid) ||
+      (payload.id && s.id === payload.id) ||
+      s.email.trim().toLowerCase() === cleanEmail
+  );
+
+  const nowIso = new Date().toISOString();
+  const sellerRecord: SellerProfile =
+    existingIdx !== -1
+      ? {
+          ...sellers[existingIdx],
+          uid: payload.uid || sellers[existingIdx].uid,
+          docId: payload.docId || sellers[existingIdx].docId || payload.uid,
+          email: cleanEmail,
+          storeName: cleanStore,
+          ownerName: cleanOwner,
+          phone: cleanPhone,
+          gstOrPan: payload.gstOrPan !== undefined ? payload.gstOrPan.trim() : sellers[existingIdx].gstOrPan || '',
+          pickupAddress: cleanAddress,
+          pickupPincode: cleanPincode || sellers[existingIdx].pickupPincode || '',
+          payoutAccount: cleanPayoutAccount || sellers[existingIdx].payoutAccount || '',
+          totalPaidOut: payload.totalPaidOut ?? sellers[existingIdx].totalPaidOut ?? 0,
+          pendingPayoutAmount: payload.pendingPayoutAmount ?? sellers[existingIdx].pendingPayoutAmount ?? 0,
+          payoutStatus: payload.payoutStatus ?? sellers[existingIdx].payoutStatus ?? 'none',
+          payoutRequestedAt: payload.payoutRequestedAt ?? sellers[existingIdx].payoutRequestedAt,
+          lastPayoutPaidAt: payload.lastPayoutPaidAt ?? sellers[existingIdx].lastPayoutPaidAt,
+          payoutHistory: payload.payoutHistory ?? sellers[existingIdx].payoutHistory ?? [],
+          status: payload.status
+            ? normalizeSellerStatus(payload.status)
+            : normalizeSellerStatus(sellers[existingIdx].status),
+        }
+      : {
+          id: payload.id || payload.uid || `seller_${Date.now()}`,
+          uid: payload.uid,
+          docId: payload.docId || payload.uid,
+          email: cleanEmail,
+          storeName: cleanStore,
+          ownerName: cleanOwner,
+          phone: cleanPhone,
+          gstOrPan: payload.gstOrPan?.trim() || '',
+          pickupAddress: cleanAddress,
+          pickupPincode: cleanPincode,
+          payoutAccount: cleanPayoutAccount,
+          totalPaidOut: payload.totalPaidOut ?? 0,
+          pendingPayoutAmount: payload.pendingPayoutAmount ?? 0,
+          payoutStatus: payload.payoutStatus ?? 'none',
+          payoutRequestedAt: payload.payoutRequestedAt,
+          lastPayoutPaidAt: payload.lastPayoutPaidAt,
+          payoutHistory: payload.payoutHistory ?? [],
+          status: payload.status ? normalizeSellerStatus(payload.status) : 'pending',
+          created_at: payload.created_at || nowIso,
+        };
+
+  if (existingIdx !== -1) {
+    sellers[existingIdx] = sellerRecord;
+  } else {
+    sellers.unshift(sellerRecord);
+  }
+  writeJSON(KEYS.sellers, sellers);
+  setStoredCurrentSeller(sellerRecord);
+
+  // Also mark matching user in local users & currentUser as seller
+  const users = readJSON<StoredUser[]>(KEYS.users, DEFAULT_USERS);
+  const uIdx = users.findIndex(
+    (u) => (payload.uid && u.uid === payload.uid) || u.email.trim().toLowerCase() === cleanEmail
+  );
+  if (uIdx !== -1) {
+    users[uIdx] = {
+      ...users[uIdx],
+      isSeller: true,
+      role: users[uIdx].role === 'admin' ? 'admin' : 'seller',
+      sellerStoreName: cleanStore,
+    };
+    writeJSON(KEYS.users, users);
+    const cur = readJSON<User | null>(KEYS.currentUser, null);
+    if (cur && (cur.email.trim().toLowerCase() === cleanEmail || (payload.uid && cur.uid === payload.uid))) {
+      setStoredCurrentUser({
+        ...cur,
+        isSeller: true,
+        role: cur.role === 'admin' ? 'admin' : 'seller',
+        sellerStoreName: cleanStore,
+      });
+    }
+  }
+
+  return {
+    success: true,
+    message:
+      existingIdx !== -1
+        ? 'Seller profile updated.'
+        : 'Seller account submitted! Your store is pending Admin approval.',
+    seller: sellerRecord,
+  };
+}
+
+export function requestSellerPayoutLocal(
+  sellerIdentifier: string,
+  amount: number,
+  payoutAccount: string
+): { success: boolean; message: string; seller?: SellerProfile } {
+  const cleanId = sellerIdentifier.trim().toLowerCase();
+  const cleanAmount = Math.round(Number(amount || 0) * 100) / 100;
+  const cleanAccount = payoutAccount.trim();
+
+  if (cleanAmount <= 0) {
+    return { success: false, message: 'No withdrawable balance available for payout.' };
+  }
+  if (cleanAccount.length < 3) {
+    return { success: false, message: 'Please add a valid Bank Account or UPI ID first.' };
+  }
+
+  const sellers = getStoredSellersLocal();
+  const idx = sellers.findIndex(
+    (s) =>
+      s.id.toLowerCase() === cleanId ||
+      (s.uid && s.uid.toLowerCase() === cleanId) ||
+      (s.docId && s.docId.toLowerCase() === cleanId) ||
+      s.email.trim().toLowerCase() === cleanId
+  );
+  if (idx === -1) {
+    return { success: false, message: 'Seller profile not found.' };
+  }
+
+  const nowIso = new Date().toISOString();
+  const existingHistory = Array.isArray(sellers[idx].payoutHistory) ? sellers[idx].payoutHistory! : [];
+  const nextPending = Math.round((Number(sellers[idx].pendingPayoutAmount || 0) + cleanAmount) * 100) / 100;
+  const record: SellerPayoutRecord = {
+    id: `po_${Date.now()}`,
+    amount: cleanAmount,
+    payoutAccount: cleanAccount,
+    status: 'requested',
+    requestedAt: nowIso,
+  };
+
+  sellers[idx] = {
+    ...sellers[idx],
+    payoutAccount: cleanAccount,
+    pendingPayoutAmount: nextPending,
+    payoutStatus: 'requested',
+    payoutRequestedAt: nowIso,
+    payoutHistory: [record, ...existingHistory].slice(0, 20),
+  };
+
+  writeJSON(KEYS.sellers, sellers);
+
+  const cur = getStoredCurrentSeller();
+  if (
+    cur &&
+    (cur.id.toLowerCase() === cleanId ||
+      (cur.uid && cur.uid.toLowerCase() === cleanId) ||
+      cur.email.trim().toLowerCase() === cleanId)
+  ) {
+    setStoredCurrentSeller(sellers[idx]);
+  }
+
+  return {
+    success: true,
+    message: `Payout request recorded for ${cleanAccount}. Smart Basket Admin will process it shortly.`,
+    seller: sellers[idx],
+  };
+}
+
+export function markSellerPayoutPaidLocal(
+  sellerIdentifier: string,
+  amountOverride?: number
+): { success: boolean; message: string; seller?: SellerProfile; paidAmount?: number } {
+  const cleanId = sellerIdentifier.trim().toLowerCase();
+  const sellers = getStoredSellersLocal();
+  const idx = sellers.findIndex(
+    (s) =>
+      s.id.toLowerCase() === cleanId ||
+      (s.uid && s.uid.toLowerCase() === cleanId) ||
+      (s.docId && s.docId.toLowerCase() === cleanId) ||
+      s.email.trim().toLowerCase() === cleanId
+  );
+  if (idx === -1) {
+    return { success: false, message: 'Seller profile not found.' };
+  }
+
+  const currentPending = Math.round(Number(sellers[idx].pendingPayoutAmount || 0) * 100) / 100;
+  const fallbackAmt = Math.round(Number(amountOverride || 0) * 100) / 100;
+  const paidAmount = currentPending > 0 ? currentPending : fallbackAmt;
+
+  if (paidAmount <= 0) {
+    return { success: false, message: 'No pending payout balance to mark as paid.' };
+  }
+
+  const nowIso = new Date().toISOString();
+  const nextTotalPaidOut = Math.round((Number(sellers[idx].totalPaidOut || 0) + paidAmount) * 100) / 100;
+  const existingHistory = Array.isArray(sellers[idx].payoutHistory) ? sellers[idx].payoutHistory! : [];
+  const hadRequested = existingHistory.some((h) => h.status === 'requested');
+
+  const updatedHistory: SellerPayoutRecord[] = hadRequested
+    ? existingHistory.map((h) =>
+        h.status === 'requested'
+          ? { ...h, status: 'paid' as const, paidAt: nowIso }
+          : h
+      )
+    : [
+        {
+          id: `po_${Date.now()}`,
+          amount: paidAmount,
+          payoutAccount: sellers[idx].payoutAccount || 'Registered UPI/Bank',
+          status: 'paid' as const,
+          requestedAt: nowIso,
+          paidAt: nowIso,
+        },
+        ...existingHistory,
+      ].slice(0, 20);
+
+  sellers[idx] = {
+    ...sellers[idx],
+    totalPaidOut: nextTotalPaidOut,
+    pendingPayoutAmount: 0,
+    payoutStatus: 'paid',
+    lastPayoutPaidAt: nowIso,
+    payoutHistory: updatedHistory,
+  };
+
+  writeJSON(KEYS.sellers, sellers);
+
+  const cur = getStoredCurrentSeller();
+  if (
+    cur &&
+    (cur.id.toLowerCase() === cleanId ||
+      (cur.uid && cur.uid.toLowerCase() === cleanId) ||
+      cur.email.trim().toLowerCase() === cleanId)
+  ) {
+    setStoredCurrentSeller(sellers[idx]);
+  }
+
+  return {
+    success: true,
+    message: `Payout of ₹${paidAmount.toLocaleString('en-IN')} marked as Paid for ${sellers[idx].storeName}.`,
+    seller: sellers[idx],
+    paidAmount,
+  };
 }
