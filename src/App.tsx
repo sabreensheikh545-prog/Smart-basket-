@@ -1927,27 +1927,153 @@ export default function App() {
           {/* PROFILE PAGE */}
           {page === 'profile' && currentUser && (
             <main className="max-w-2xl mx-auto px-3 sm:px-4 py-5 space-y-4">
-              <div className="bg-white rounded-xl border border-slate-200 p-5 flex flex-wrap items-center justify-between gap-4">
-                <div className="flex items-center gap-4 min-w-0">
-                  <div className="w-14 h-14 rounded-full bg-[#2874F0] text-white flex items-center justify-center text-xl font-extrabold shrink-0">
-                    {currentUser.name.charAt(0).toUpperCase()}
-                  </div>
-                  <div className="min-w-0 space-y-0.5">
-                    <h1 className="text-lg font-extrabold text-slate-900 truncate">{currentUser.name}</h1>
-                    <p className="text-xs text-slate-600 truncate flex items-center gap-1.5">
-                      <i className="fa-solid fa-envelope text-[#2874F0] w-3.5 text-center shrink-0"></i>
-                      <span className="truncate">{currentUser.email || 'No email added'}</span>
-                    </p>
-                    <p className="text-xs text-slate-600 truncate flex items-center gap-1.5">
-                      <i className="fa-solid fa-phone text-[#388E3C] w-3.5 text-center shrink-0"></i>
-                      <span>{currentUser.phone ? `+91 ${currentUser.phone}` : 'Mobile number not added'}</span>
-                    </p>
-                  </div>
+                          {/* Flipkart-Style Account Header & SmartCoins */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-4 shadow-sm">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <h1 className="text-xl font-extrabold text-slate-900 truncate">
+                    Hey, {currentUser.name}
+                  </h1>
+                  <p className="text-xs text-slate-500 truncate mt-0.5">
+                    {currentUser.email || currentUser.phone || 'Smart Basket Member'}
+                  </p>
                 </div>
-                <button type="button" onClick={() => setPage('orders')} className="px-4 py-2 rounded-lg bg-blue-50 text-[#2874F0] text-xs font-bold shrink-0">
-                  My Orders
+                <button
+                  type="button"
+                  onClick={() =>
+                    showModal({
+                      title: 'Smart Basket Support',
+                      message: 'Need help with an order, payment, or delivery? Contact our support desk at sabreensheikh545@gmail.com or check My Orders for live status.',
+                      type: 'info',
+                      confirmText: 'View My Orders',
+                      onConfirm: () => setPage('orders'),
+                    })
+                  }
+                  className="px-3.5 py-2 rounded-full border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs font-bold text-slate-800 flex items-center gap-1.5 shrink-0"
+                >
+                  <i className="fa-solid fa-headset text-[#2874F0]"></i>
+                  <span>Help</span>
                 </button>
               </div>
+
+              {/* Real SmartCoin Balance Banner */}
+              <div className="rounded-xl bg-gradient-to-r from-blue-50 via-indigo-50 to-amber-50 border border-blue-100 overflow-hidden">
+                <div className="px-3.5 py-2.5 flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-800">
+                    Your SmartCoin balance
+                  </span>
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white border border-amber-200 text-xs font-extrabold text-slate-900 shadow-xs">
+                    <i className="fa-solid fa-bolt text-amber-500"></i>
+                    <span>
+                      {Math.floor(
+                        [...activeOrders, ...historyOrders].reduce(
+                          (sum, o) => sum + (o.status !== 'Cancelled' ? Number(o.total || 0) : 0),
+                          0
+                        ) / 50
+                      )}
+                    </span>
+                  </span>
+                </div>
+                <div className="px-3.5 py-2 bg-white/80 border-t border-blue-100/80 flex items-center justify-between text-[11px] font-semibold text-slate-700">
+                  <span>Earn 2 SmartCoins on every ₹100 spent</span>
+                  <span className="text-[#2874F0] font-bold">Plus Member ›</span>
+                </div>
+              </div>
+
+              {/* Orders & Explore Quick Action Grid */}
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setPage('orders')}
+                  className="h-12 px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 flex items-center justify-center gap-2.5 text-sm font-bold text-slate-900 shadow-2xs"
+                >
+                  <i className="fa-solid fa-box-open text-[#2874F0] text-base"></i>
+                  <span>Orders</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPage('shop')}
+                  className="h-12 px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 flex items-center justify-center gap-2.5 text-sm font-bold text-slate-900 shadow-2xs"
+                >
+                  <i className="fa-solid fa-heart text-rose-500 text-base"></i>
+                  <span>Wishlist & Shop</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Payment & Rewards Options */}
+            <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-sm">
+              <h2 className="text-base font-extrabold text-slate-900">Payment &amp; Rewards</h2>
+              <div className="divide-y divide-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setPage('cart')}
+                  className="w-full py-3 flex items-center justify-between gap-3 text-left"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-10 h-10 rounded-full bg-blue-50 text-[#2874F0] flex items-center justify-center shrink-0">
+                      <i className="fa-solid fa-shield-halved"></i>
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-bold text-slate-900 truncate">Instant UPI, Card &amp; EMI</p>
+                      <p className="text-xs text-slate-500 truncate">Powered by Razorpay Secure Checkout</p>
+                    </div>
+                  </div>
+                  <i className="fa-solid fa-chevron-right text-xs text-slate-400"></i>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPage('orders')}
+                  className="w-full py-3 flex items-center justify-between gap-3 text-left"
+                >
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="w-10 h-10 rounded-full bg-amber-50 text-amber-600 flex items-center justify-center shrink-0">
+                      <i className="fa-solid fa-coins"></i>
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-sm font-bold text-slate-900 truncate">SmartCoin Rewards History</p>
+                      <p className="text-xs text-slate-500 truncate">Auto-credited on every confirmed order</p>
+                    </div>
+                  </div>
+                  <i className="fa-solid fa-chevron-right text-xs text-slate-400"></i>
+                </button>
+              </div>
+            </div>
+
+            {/* Recently Viewed / Top Picks Horizontal Strip */}
+            {products.length > 0 && (
+              <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-base font-extrabold text-slate-900">Recently Viewed Stores</h2>
+                  <button
+                    type="button"
+                    onClick={() => setPage('shop')}
+                    className="text-xs font-bold text-[#2874F0]"
+                  >
+                    See All ›
+                  </button>
+                </div>
+                <div className="flex gap-3 overflow-x-auto pb-1">
+                  {products.slice(0, 6).map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={() => openProductDetail(item)}
+                      className="w-28 shrink-0 rounded-xl border border-slate-200 bg-slate-50/60 p-2 text-left space-y-1.5 hover:border-[#2874F0]"
+                    >
+                      <img
+                        src={item.image}
+                        alt={item.name}
+                        className="w-full h-24 object-cover rounded-lg bg-white"
+                      />
+                      <p className="text-xs font-semibold text-slate-800 truncate">{item.name}</p>
+                      <p className="text-xs font-extrabold text-slate-900">{formatINR(item.price)}</p>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+                        
 
               <form onSubmit={handleProfileSave} className="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
                 <h2 className="text-base font-bold text-slate-900">Account Details</h2>
