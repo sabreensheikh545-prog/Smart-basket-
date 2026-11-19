@@ -44,9 +44,8 @@ import {
 } from './types';
 
 type UserPage = 'home' | 'shop' | 'detail' | 'cart' | 'checkout' | 'orders' | 'profile' | 'login';
-const RAZORPAY_KEY_ID = 'rzp_test_1DP5mmOlF5G5ag'; // Live KYC होते ही यहाँ अपनी rzp_live_... Key डालें
+const RAZORPAY_KEY_ID = "rzp_live_U1t08rrhb6TEXG";
 
-interface ModalConfig {
   open: boolean;
   title: string;
   message: string;
