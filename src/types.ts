@@ -13,12 +13,14 @@ export interface Product {
   description: string;
   price: number;
   mrp?: number;
-  gst_rate?: number; // 0, 5, 12, 18, 28
   rating?: number;
   reviews?: number;
   stock: number;
   image: string;
   created_at: string;
+  sellerId?: string;
+  sellerEmail?: string;
+  sellerName?: string;
 }
 
 export interface User {
@@ -31,6 +33,75 @@ export interface User {
   address: string;
   status: 'active' | 'blocked';
   created_at: string;
+  role?: 'customer' | 'seller' | 'admin';
+  isSeller?: boolean;
+  sellerStoreName?: string;
+}
+
+export interface SavedAddress {
+  name: string;
+  phone: string;
+  houseStreet: string;
+  area?: string;
+  city: string;
+  state?: string;
+  pincode: string;
+}
+
+export const SELLER_PLATFORM_COMMISSION_RATE = 0.1;
+
+export interface SellerPayoutRecord {
+  id: string;
+  amount: number;
+  payoutAccount: string;
+  status: 'requested' | 'paid';
+  requestedAt: string;
+  paidAt?: string;
+}
+
+export interface SellerProfile {
+  id: string;
+  uid?: string;
+  docId?: string;
+  email: string;
+  storeName: string;
+  ownerName: string;
+  phone: string;
+  gstOrPan?: string;
+  pickupAddress: string;
+  pickupPincode?: string;
+  payoutAccount?: string;
+  totalPaidOut?: number;
+  pendingPayoutAmount?: number;
+  payoutStatus?: 'none' | 'requested' | 'paid';
+  payoutRequestedAt?: string;
+  lastPayoutPaidAt?: string;
+  payoutHistory?: SellerPayoutRecord[];
+  status: 'approved' | 'pending' | 'blocked' | 'active' | 'suspended';
+  created_at: string;
+}
+
+export function calculateSellerEarnings(
+  deliveredSales: number,
+  seller?: Pick<SellerProfile, 'totalPaidOut' | 'pendingPayoutAmount'> | null
+) {
+  const grossDelivered = Math.max(0, Math.round(Number(deliveredSales || 0) * 100) / 100);
+  const platformFee = Math.round(grossDelivered * SELLER_PLATFORM_COMMISSION_RATE * 100) / 100;
+  const netEarnings = Math.max(0, Math.round((grossDelivered - platformFee) * 100) / 100);
+  const totalPaidOut = Math.max(0, Math.round(Number(seller?.totalPaidOut || 0) * 100) / 100);
+  const pendingPayout = Math.max(0, Math.round(Number(seller?.pendingPayoutAmount || 0) * 100) / 100);
+  const withdrawableBalance = Math.max(
+    0,
+    Math.round((netEarnings - totalPaidOut - pendingPayout) * 100) / 100
+  );
+  return {
+    grossDelivered,
+    platformFee,
+    netEarnings,
+    totalPaidOut,
+    pendingPayout,
+    withdrawableBalance,
+  };
 }
 
 export interface OrderItem {
@@ -42,8 +113,51 @@ export interface OrderItem {
   product_image: string;
   quantity: number;
   price: number;
-  gst_rate?: number;
+  sellerId?: string;
+  sellerEmail?: string;
+  sellerName?: string;
 }
+
+export type OrderStatus =
+  | 'Placed'
+  | 'Confirmed'
+  | 'Packed'
+  | 'Shipped'
+  | 'Dispatched'
+  | 'Out for Delivery'
+  | 'Delivered'
+  | 'Return Requested'
+  | 'Return Approved'
+  | 'Refunded'
+  | 'Cancelled';
+
+export const COURIER_PARTNERS = [
+  'Delhivery',
+  'Shiprocket',
+  'India Post',
+  'BlueDart',
+  'Local Rider',
+] as const;
+
+export const RETURN_REASONS = [
+  'Damaged Item',
+  'Wrong Item Delivered',
+  'Quality Issue',
+  'Missing Parts / Accessories',
+  'Defective / Not Working',
+] as const;
+
+export const ORDER_STATUS_OPTIONS: { value: OrderStatus; label: string }[] = [
+  { value: 'Confirmed', label: 'Order Confirmed' },
+  { value: 'Packed', label: 'Packed' },
+  { value: 'Shipped', label: 'Shipped' },
+  { value: 'Out for Delivery', label: 'Out for Delivery' },
+  { value: 'Delivered', label: 'Delivered' },
+  { value: 'Return Requested', label: 'Return Requested' },
+  { value: 'Return Approved', label: 'Return Approved' },
+  { value: 'Refunded', label: 'Refunded' },
+  { value: 'Cancelled', label: 'Cancelled' },
+];
 
 export interface Order {
   id: number;
@@ -54,29 +168,110 @@ export interface Order {
   phone: string;
   email?: string;
   address: string;
-  subtotal_amount?: number;
-  gst_amount?: number;
   total_amount: number;
   total?: number;
+  platformFee?: number;
+  couponCode?: string;
+  couponDiscount?: number;
   paymentMethod?: string;
-  utr_number?: string;
-  payment_verified?: boolean;
-  seller_gstin?: string;
-  status: 'Placed' | 'Dispatched' | 'Delivered' | 'Cancelled';
+  status: OrderStatus;
+  courierName?: string;
+  trackingId?: string;
+  trackingUrl?: string;
+  trackingNote?: string;
+  returnReason?: string;
+  returnResolution?: 'Return' | 'Replace';
+  returnRequestedAt?: string;
   created_at: string;
   items: OrderItem[];
-}
-
-export interface StoreSettings {
-  storeName: string;
-  upiId: string;
-  gstin: string;
-  defaultGstRate: number;
+  sellerIds?: string[];
+  sellerEmails?: string[];
 }
 
 export interface CartEntry {
   product: Product;
   quantity: number;
+}
+
+export function normalizeSellerStatus(status?: string): 'approved' | 'pending' | 'blocked' {
+  const s = (status || '').toLowerCase();
+  if (s === 'approved' || s === 'active') return 'approved';
+  if (s === 'blocked' || s === 'suspended') return 'blocked';
+  return 'pending';
+}
+
+export function normalizeOrderStatus(status?: string): OrderStatus {
+  if (status === 'Placed') return 'Confirmed';
+  if (status === 'Dispatched') return 'Shipped';
+  const allowed: OrderStatus[] = [
+    'Confirmed',
+    'Packed',
+    'Shipped',
+    'Out for Delivery',
+    'Delivered',
+    'Return Requested',
+    'Return Approved',
+    'Refunded',
+    'Cancelled',
+  ];
+  return allowed.includes(status as OrderStatus) ? (status as OrderStatus) : 'Confirmed';
+}
+
+export function getOrderStepIndex(status: OrderStatus): number {
+  switch (status) {
+    case 'Delivered':
+    case 'Return Requested':
+    case 'Return Approved':
+    case 'Refunded':
+      return 5;
+    case 'Out for Delivery':
+      return 4;
+    case 'Shipped':
+    case 'Dispatched':
+      return 3;
+    case 'Packed':
+      return 2;
+    case 'Cancelled':
+      return 0;
+    case 'Confirmed':
+    case 'Placed':
+    default:
+      return 1;
+  }
+}
+
+export function getOrderStatusLabel(status: OrderStatus): string {
+  if (status === 'Placed' || status === 'Confirmed') return 'Order Confirmed';
+  if (status === 'Dispatched') return 'Shipped';
+  return status;
+}
+
+export function getCourierTrackingUrl(
+  courierName?: string,
+  trackingId?: string,
+  trackingUrl?: string
+): string {
+  const custom = (trackingUrl || '').trim();
+  if (custom) {
+    return /^https?:\/\//i.test(custom) ? custom : `https://${custom}`;
+  }
+  const awb = (trackingId || '').trim();
+  const courier = (courierName || '').trim().toLowerCase();
+  if (!awb) return '';
+  const encodedAwb = encodeURIComponent(awb);
+  if (courier.includes('delhivery')) {
+    return `https://www.delhivery.com/track-v2/package/${encodedAwb}`;
+  }
+  if (courier.includes('shiprocket')) {
+    return `https://www.shiprocket.in/shipment-tracking/?awb=${encodedAwb}`;
+  }
+  if (courier.includes('bluedart') || courier.includes('blue dart')) {
+    return `https://www.bluedart.com/tracking?trackFor=0&trackNo=${encodedAwb}`;
+  }
+  if (courier.includes('india post') || courier.includes('indiapost')) {
+    return `https://www.indiapost.gov.in/_layouts/15/dop.portal.tracking/trackconsignment.aspx`;
+  }
+  return `https://www.google.com/search?q=${encodeURIComponent(`${courierName || 'courier'} tracking ${awb}`)}`;
 }
 
 export function formatINR(amount: number): string {
