@@ -1333,6 +1333,19 @@ export default function App() {
         email: currentUser.email || auth.currentUser?.email || '',
       },
       theme: { color: '#2874F0' },
+            config: {
+        display: {
+          blocks: {
+            upi: {
+              name: 'Pay via UPI',
+              instruments: [{ method: 'upi' }],
+            },
+          },
+          sequence: ['block.upi', 'block.card', 'block.netbanking', 'block.wallet'],
+          preferences: { show_default_blocks: true },
+        },
+      },
+      
       handler: async (response: { razorpay_payment_id?: string }) => {
         const payId = response?.razorpay_payment_id ? ` (${response.razorpay_payment_id})` : '';
         await finalizeOrder(`Online Paid${payId}`);
