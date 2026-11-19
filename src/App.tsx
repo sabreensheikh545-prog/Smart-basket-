@@ -45,7 +45,8 @@ import {
 
 type UserPage = 'home' | 'shop' | 'detail' | 'cart' | 'checkout' | 'orders' | 'profile' | 'login';
 const RAZORPAY_KEY_ID = "rzp_live_U1t08rrhb6TEXG";
-
+interface ModalConfig {
+  
   open: boolean;
   title: string;
   message: string;
