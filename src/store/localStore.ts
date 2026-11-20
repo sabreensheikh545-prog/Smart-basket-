@@ -27,6 +27,11 @@ import {
   isOnlinePaidOrder,
   normalizeSellerStatus,
 } from '../types';
+import {
+  isValidAadhaarVerhoeff,
+  isValidIndianMobile,
+  isValidIndianVehicleNumber,
+} from '../utils/indianKycValidation';
 
 export const ASSETS = {
   smartphone: smartphoneImg,
@@ -1532,26 +1537,35 @@ export function submitRiderKycApplicationLocal(payload: {
   if (cleanName.length < 2) {
     return { success: false, message: 'Please enter your Full Name.' };
   }
-  if (cleanPhone.length !== 10) {
-    return { success: false, message: 'Please enter a valid 10-digit Mobile Number.' };
+  if (!isValidIndianMobile(cleanPhone)) {
+    return {
+      success: false,
+      message: 'Please enter a valid 10-digit Indian Mobile Number starting with 6, 7, 8, or 9.',
+    };
   }
-  if (cleanArea.length < 3) {
-    return { success: false, message: 'Please enter your Area & Pincode (e.g., Bawana 110039).' };
+  if (cleanArea.length < 3 || !/[1-9]\d{5}/.test(cleanArea)) {
+    return { success: false, message: 'Please enter a valid 6-digit Indian Pincode verified via India Post.' };
   }
-  if (!cleanVehicleType || cleanVehicleNo.length < 4) {
-    return { success: false, message: 'Please enter your Vehicle Type and Vehicle Number.' };
+  if (!cleanVehicleType || !isValidIndianVehicleNumber(cleanVehicleNo)) {
+    return {
+      success: false,
+      message: 'Please enter a valid Indian RTO Vehicle Number (e.g., DL01AB1234).',
+    };
   }
-  if (cleanAadhaar.length !== 12) {
-    return { success: false, message: 'Please enter a valid 12-digit Aadhaar Number.' };
+  if (!isValidAadhaarVerhoeff(cleanAadhaar)) {
+    return {
+      success: false,
+      message: 'Invalid 12-digit Aadhaar Number. Must start with 2-9 and pass official Verhoeff checksum.',
+    };
   }
   if (!payload.aadhaarPhoto) {
-    return { success: false, message: 'Please upload your Aadhaar Card photo.' };
+    return { success: false, message: 'Please capture your Aadhaar Card photo using live camera.' };
   }
   if (!payload.drivingLicensePhoto) {
-    return { success: false, message: 'Please upload your Driving License photo.' };
+    return { success: false, message: 'Please capture your Driving License photo using live camera.' };
   }
   if (!payload.selfiePhoto) {
-    return { success: false, message: 'Please upload or capture your Live Selfie.' };
+    return { success: false, message: 'Please capture your Live Selfie using front camera.' };
   }
   if (cleanPin.length !== 4) {
     return { success: false, message: 'Please create a 4-digit numeric Login PIN.' };

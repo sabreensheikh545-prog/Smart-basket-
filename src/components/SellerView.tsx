@@ -46,6 +46,12 @@ import {
   normalizeOrderStatus,
   normalizeSellerStatus,
 } from '../types';
+import { IndianPincodeField, PhoneOtpField } from './IndianVerificationFields';
+import {
+  PincodeLookupResult,
+  isValidIndianMobile,
+  isValidIndianPincodeFormat,
+} from '../utils/indianKycValidation';
 
 type SellerTab = 'dashboard' | 'products' | 'orders' | 'order_detail' | 'profile';
 
@@ -157,8 +163,11 @@ export const SellerView: React.FC<Props> = ({
   const [storeName, setStoreName] = useState('');
   const [ownerName, setOwnerName] = useState('');
   const [sellerPhone, setSellerPhone] = useState('');
+  const [verifiedSellerPhone, setVerifiedSellerPhone] = useState<string | null>(null);
   const [pickupAddress, setPickupAddress] = useState('');
   const [pickupPincode, setPickupPincode] = useState('');
+  const [sellerPostOffice, setSellerPostOffice] = useState('');
+  const [sellerPincodeResult, setSellerPincodeResult] = useState<PincodeLookupResult | null>(null);
   const [gstOrPan, setGstOrPan] = useState('');
   const [payoutAccount, setPayoutAccount] = useState('');
   const [regError, setRegError] = useState('');
@@ -187,7 +196,8 @@ export const SellerView: React.FC<Props> = ({
 
     setLoadingProfile(true);
     setOwnerName(currentUser.name || '');
-    setSellerPhone(currentUser.phone || '');
+    setSellerPhone((currentUser.phone || '').replace(/\D/g, '').slice(-10));
+    setVerifiedSellerPhone(null);
     setPickupAddress(currentUser.address || '');
     const pinFromAddr = (currentUser.address || '').match(/\b\d{6}\b/)?.[0] || '';
     setPickupPincode(pinFromAddr);
@@ -199,7 +209,11 @@ export const SellerView: React.FC<Props> = ({
       if (found) {
         setStoreName(found.storeName);
         setOwnerName(found.ownerName);
-        setSellerPhone(found.phone);
+        const existingDigits = (found.phone || '').replace(/\D/g, '').slice(-10);
+        setSellerPhone(existingDigits);
+        if (isValidIndianMobile(existingDigits)) {
+          setVerifiedSellerPhone(existingDigits);
+        }
         setPickupAddress(found.pickupAddress);
         const resolvedPin =
           found.pickupPincode || found.pickupAddress.match(/\b\d{6}\b/)?.[0] || '';
@@ -317,8 +331,8 @@ export const SellerView: React.FC<Props> = ({
         setAuthError('Please enter your full name.');
         return;
       }
-      if (digits.length !== 10) {
-        setAuthError('Please enter a valid 10-digit mobile number.');
+      if (!isValidIndianMobile(digits)) {
+        setAuthError('Please enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.');
         return;
       }
     }
@@ -434,10 +448,52 @@ export const SellerView: React.FC<Props> = ({
     }
   };
 
+  const cleanSellerPhoneDigits = sellerPhone.replace(/\D/g, '').slice(0, 10);
+  const isSellerPhoneOtpVerified = Boolean(
+    verifiedSellerPhone &&
+      verifiedSellerPhone === cleanSellerPhoneDigits &&
+      isValidIndianMobile(cleanSellerPhoneDigits)
+  );
+  const isSellerPincodeVerified = Boolean(sellerPincodeResult?.valid);
+  const canSubmitSellerForm =
+    storeName.trim().length >= 2 &&
+    ownerName.trim().length >= 2 &&
+    isSellerPhoneOtpVerified &&
+    pickupAddress.trim().length >= 5 &&
+    isSellerPincodeVerified &&
+    payoutAccount.trim().length >= 3;
+
   const handleSellerRegistrationOrUpdate = async (e: React.FormEvent, isProfileUpdate = false) => {
     e.preventDefault();
     if (!currentUser) return;
     setRegError('');
+
+    const cleanPhone = sellerPhone.replace(/\D/g, '').slice(0, 10);
+    const cleanPin = pickupPincode.replace(/\D/g, '').slice(0, 6);
+
+    if (!isValidIndianMobile(cleanPhone)) {
+      setRegError('Enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.');
+      return;
+    }
+    if (verifiedSellerPhone !== cleanPhone) {
+      setRegError('Please verify your Mobile Number via SMS OTP before submitting.');
+      return;
+    }
+    if (!isValidIndianPincodeFormat(cleanPin) || !sellerPincodeResult?.valid) {
+      setRegError('Please enter a valid 6-digit Indian Pincode verified via India Post.');
+      return;
+    }
+
+    const baseAddress = pickupAddress.trim();
+    const postOfficeLabel = sellerPostOffice || sellerPincodeResult.postOffice || '';
+    const districtState = [sellerPincodeResult.district, sellerPincodeResult.state]
+      .filter(Boolean)
+      .join(', ');
+    const enrichedPickupAddress =
+      districtState && !baseAddress.toLowerCase().includes((sellerPincodeResult.district || '').toLowerCase())
+        ? `${baseAddress}, ${postOfficeLabel ? `${postOfficeLabel}, ` : ''}${districtState}`
+        : baseAddress;
+
     showLoader(isProfileUpdate ? 'Saving store & KYC profile...' : 'Submitting seller KYC registration...');
 
     const res = await registerOrUpdateSellerFirestore({
@@ -445,10 +501,10 @@ export const SellerView: React.FC<Props> = ({
       email: currentUser.email,
       storeName,
       ownerName,
-      phone: sellerPhone,
+      phone: cleanPhone,
       gstOrPan,
-      pickupAddress,
-      pickupPincode,
+      pickupAddress: enrichedPickupAddress,
+      pickupPincode: cleanPin,
       payoutAccount,
     });
 
@@ -947,61 +1003,47 @@ export const SellerView: React.FC<Props> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Mobile Number <span className="text-rose-500">*</span>
-                  </label>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Verified Account Email</label>
                   <input
-                    type="tel"
-                    inputMode="numeric"
-                    maxLength={10}
-                    value={sellerPhone}
-                    onChange={(e) => setSellerPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
-                    required
-                    placeholder="10-digit mobile number"
-                    className="w-full h-11 px-3.5 rounded-lg bg-slate-50 border border-slate-300 text-sm focus:bg-white focus:border-[#2874F0] focus:outline-none"
+                    type="email"
+                    value={currentUser.email}
+                    readOnly
+                    className="w-full h-11 px-3.5 rounded-lg bg-slate-100 border border-slate-200 text-sm text-slate-600 cursor-not-allowed"
                   />
                 </div>
               </div>
+
+              {/* Mandatory Firebase Phone SMS OTP Verification */}
+              <PhoneOtpField
+                label="Mobile Number"
+                phone={sellerPhone}
+                onPhoneChange={setSellerPhone}
+                verifiedPhone={verifiedSellerPhone}
+                onVerifiedChange={setVerifiedSellerPhone}
+              />
+
+              {/* Strict India Post 6-Digit Pickup Pincode Lookup */}
+              <IndianPincodeField
+                label="Pickup Pincode (India Post Verified)"
+                pincode={pickupPincode}
+                onPincodeChange={setPickupPincode}
+                selectedPostOffice={sellerPostOffice}
+                onSelectedPostOfficeChange={setSellerPostOffice}
+                onLookupResult={setSellerPincodeResult}
+              />
 
               <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Verified Account Email</label>
-                <input
-                  type="email"
-                  value={currentUser.email}
-                  readOnly
-                  className="w-full h-11 px-3.5 rounded-lg bg-slate-100 border border-slate-200 text-sm text-slate-600 cursor-not-allowed"
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Pickup Street / Shop Address <span className="text-rose-500">*</span>
+                </label>
+                <textarea
+                  rows={2}
+                  value={pickupAddress}
+                  onChange={(e) => setPickupAddress(e.target.value)}
+                  required
+                  placeholder="Shop / Warehouse building, Street, Landmark"
+                  className="w-full p-3 rounded-lg bg-slate-50 border border-slate-300 text-sm focus:bg-white focus:border-[#2874F0] focus:outline-none"
                 />
-              </div>
-
-              <div className="grid sm:grid-cols-3 gap-3.5">
-                <div className="sm:col-span-2">
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Pickup Address <span className="text-rose-500">*</span>
-                  </label>
-                  <textarea
-                    rows={2}
-                    value={pickupAddress}
-                    onChange={(e) => setPickupAddress(e.target.value)}
-                    required
-                    placeholder="Shop / Warehouse street, Area, City, State"
-                    className="w-full p-3 rounded-lg bg-slate-50 border border-slate-300 text-sm focus:bg-white focus:border-[#2874F0] focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Pickup Pincode <span className="text-rose-500">*</span>
-                  </label>
-                  <input
-                    type="tel"
-                    inputMode="numeric"
-                    maxLength={6}
-                    value={pickupPincode}
-                    onChange={(e) => setPickupPincode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                    required
-                    placeholder="6-digit PIN"
-                    className="w-full h-11 px-3.5 rounded-lg bg-slate-50 border border-slate-300 text-sm font-mono focus:bg-white focus:border-[#2874F0] focus:outline-none"
-                  />
-                </div>
               </div>
 
               <div className="grid sm:grid-cols-2 gap-3.5">
@@ -1032,6 +1074,26 @@ export const SellerView: React.FC<Props> = ({
                 </div>
               </div>
 
+              {/* Mandatory Verification Readiness Status */}
+              <div className="rounded-xl bg-slate-50 border border-slate-200 p-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] font-semibold">
+                <span className={isSellerPhoneOtpVerified ? 'text-emerald-700' : 'text-slate-500'}>
+                  <i
+                    className={`fa-solid ${
+                      isSellerPhoneOtpVerified ? 'fa-circle-check text-emerald-600' : 'fa-circle text-slate-300'
+                    } mr-1.5`}
+                  ></i>
+                  Mobile SMS OTP Verified
+                </span>
+                <span className={isSellerPincodeVerified ? 'text-emerald-700' : 'text-slate-500'}>
+                  <i
+                    className={`fa-solid ${
+                      isSellerPincodeVerified ? 'fa-circle-check text-emerald-600' : 'fa-circle text-slate-300'
+                    } mr-1.5`}
+                  ></i>
+                  India Post Pincode Valid
+                </span>
+              </div>
+
               <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 flex items-start gap-2.5 text-[11px] text-amber-900">
                 <i className="fa-solid fa-shield-halved text-amber-600 mt-0.5 shrink-0"></i>
                 <p className="leading-relaxed">
@@ -1041,10 +1103,11 @@ export const SellerView: React.FC<Props> = ({
 
               <button
                 type="submit"
-                className="w-full h-12 rounded-lg bg-[#FB641B] text-white text-sm font-bold hover:bg-[#e55812] transition flex items-center justify-center gap-2"
+                disabled={!canSubmitSellerForm}
+                className="w-full h-12 rounded-lg bg-[#FB641B] text-white text-sm font-bold hover:bg-[#e55812] disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed transition flex items-center justify-center gap-2"
               >
                 <i className="fa-solid fa-store"></i>
-                <span>Submit Seller Registration &amp; KYC</span>
+                <span>Submit Verified Seller Registration &amp; KYC</span>
               </button>
             </form>
           </div>
@@ -1913,33 +1976,21 @@ export const SellerView: React.FC<Props> = ({
                   className="w-full h-11 px-3.5 rounded-xl bg-slate-100 border border-slate-200 text-sm text-slate-500 cursor-not-allowed"
                 />
               </div>
-              <div className="grid sm:grid-cols-2 gap-3.5">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Mobile Number</label>
-                  <input
-                    type="tel"
-                    inputMode="numeric"
-                    maxLength={10}
-                    value={sellerPhone}
-                    onChange={(e) => setSellerPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
-                    required
-                    className="w-full h-11 px-3.5 rounded-xl bg-slate-50 border border-slate-200 text-sm"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Pickup Pincode</label>
-                  <input
-                    type="tel"
-                    inputMode="numeric"
-                    maxLength={6}
-                    value={pickupPincode}
-                    onChange={(e) => setPickupPincode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                    required
-                    placeholder="6-digit pincode"
-                    className="w-full h-11 px-3.5 rounded-xl bg-slate-50 border border-slate-200 text-sm font-mono"
-                  />
-                </div>
-              </div>
+              <PhoneOtpField
+                label="Mobile Number"
+                phone={sellerPhone}
+                onPhoneChange={setSellerPhone}
+                verifiedPhone={verifiedSellerPhone}
+                onVerifiedChange={setVerifiedSellerPhone}
+              />
+              <IndianPincodeField
+                label="Pickup Pincode (India Post Verified)"
+                pincode={pickupPincode}
+                onPincodeChange={setPickupPincode}
+                selectedPostOffice={sellerPostOffice}
+                onSelectedPostOfficeChange={setSellerPostOffice}
+                onLookupResult={setSellerPincodeResult}
+              />
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">Pickup Address</label>
                 <textarea
@@ -1975,7 +2026,8 @@ export const SellerView: React.FC<Props> = ({
               </div>
               <button
                 type="submit"
-                className="w-full h-11 rounded-xl bg-[#2874F0] text-white text-sm font-bold hover:bg-[#1e60d5] transition"
+                disabled={!canSubmitSellerForm}
+                className="w-full h-11 rounded-xl bg-[#2874F0] text-white text-sm font-bold hover:bg-[#1e60d5] disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed transition"
               >
                 Save Store &amp; Payout Details
               </button>

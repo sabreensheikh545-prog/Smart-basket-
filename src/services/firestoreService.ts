@@ -64,6 +64,10 @@ import {
   isOnlinePaidOrder,
   normalizeSellerStatus,
 } from '../types';
+import {
+  isValidIndianMobile,
+  isValidIndianPincodeFormat,
+} from '../utils/indianKycValidation';
 
 let productsSeedAttempted = false;
 let categoriesSeedAttempted = false;
@@ -1163,14 +1167,20 @@ export async function registerOrUpdateSellerFirestore(payload: {
   if (cleanOwner.length < 2) {
     return { success: false, message: 'Please enter the Owner Full Name.' };
   }
-  if (cleanPhone.length < 10) {
-    return { success: false, message: 'Please enter a valid 10-digit Mobile Number.' };
+  if (!isValidIndianMobile(cleanPhone)) {
+    return {
+      success: false,
+      message: 'Please enter a valid 10-digit Indian Mobile Number starting with 6, 7, 8, or 9.',
+    };
   }
   if (cleanAddress.length < 5) {
     return { success: false, message: 'Please enter your complete Pickup Address.' };
   }
-  if (cleanPincode.length !== 6) {
-    return { success: false, message: 'Please enter a valid 6-digit Pickup Pincode.' };
+  if (!isValidIndianPincodeFormat(cleanPincode)) {
+    return {
+      success: false,
+      message: 'Please enter a valid 6-digit Indian Pickup Pincode (cannot start with 0).',
+    };
   }
   if (cleanPayoutAccount.length < 3) {
     return { success: false, message: 'Please enter a valid Bank Account or UPI ID for payouts.' };

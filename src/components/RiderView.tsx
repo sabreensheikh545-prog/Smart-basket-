@@ -21,7 +21,6 @@ import {
   RefreshCw,
   ShieldCheck,
   Truck,
-  Upload,
   UserPlus,
   Wallet,
   X,
@@ -43,6 +42,13 @@ import {
   verifyAndDeliverOrderFirestore,
 } from '../services/firestoreService';
 import { setStoredCurrentRider } from '../store/localStore';
+import { IndianPincodeField, PhoneOtpField } from './IndianVerificationFields';
+import {
+  PincodeLookupResult,
+  isValidAadhaarVerhoeff,
+  isValidIndianMobile,
+  isValidIndianVehicleNumber,
+} from '../utils/indianKycValidation';
 
 interface RiderViewProps {
   rider: DeliveryBoy | null;
@@ -129,8 +135,11 @@ export const RiderView: React.FC<RiderViewProps> = ({
   // KYC Self-Registration form state
   const [regName, setRegName] = useState('');
   const [regPhone, setRegPhone] = useState('');
+  const [regVerifiedPhone, setRegVerifiedPhone] = useState<string | null>(null);
   const [regEmail, setRegEmail] = useState('');
-  const [regAreaPincode, setRegAreaPincode] = useState('');
+  const [regPincode, setRegPincode] = useState('');
+  const [regSelectedPostOffice, setRegSelectedPostOffice] = useState('');
+  const [regPincodeResult, setRegPincodeResult] = useState<PincodeLookupResult | null>(null);
   const [regVehicleType, setRegVehicleType] = useState<string>('Bike');
   const [regVehicleNumber, setRegVehicleNumber] = useState('');
   const [regAadhaarNumber, setRegAadhaarNumber] = useState('');
@@ -238,9 +247,9 @@ export const RiderView: React.FC<RiderViewProps> = ({
     try {
       const compressed = await compressImageFile(file, 480, 0.62);
       setter(compressed);
-      showToast(`${label} uploaded`, 'success');
+      showToast(`${label} captured successfully`, 'success');
     } catch {
-      showToast(`Could not process ${label}. Try another image.`, 'error');
+      showToast(`Could not process ${label}. Please retake using camera.`, 'error');
     }
   };
 
@@ -260,16 +269,72 @@ export const RiderView: React.FC<RiderViewProps> = ({
     showToast(res.message, 'success');
   };
 
+  const cleanRegPhone = regPhone.replace(/\D/g, '').slice(0, 10);
+  const isRegPhoneOtpVerified = Boolean(
+    regVerifiedPhone && regVerifiedPhone === cleanRegPhone && isValidIndianMobile(cleanRegPhone)
+  );
+  const isRegPincodeVerified = Boolean(regPincodeResult?.valid);
+  const isRegVehicleValid = isValidIndianVehicleNumber(regVehicleNumber);
+  const isRegAadhaarValid = isValidAadhaarVerhoeff(regAadhaarNumber);
+  const hasAllKycPhotos = Boolean(regAadhaarPhoto && regDlPhoto && regSelfiePhoto);
+  const isRegPinValid = /^\d{4}$/.test(regPin);
+  const canSubmitKyc =
+    regName.trim().length >= 2 &&
+    isRegPhoneOtpVerified &&
+    isRegPincodeVerified &&
+    isRegVehicleValid &&
+    isRegAadhaarValid &&
+    hasAllKycPhotos &&
+    isRegPinValid;
+
   const handleKycSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (regName.trim().length < 2) {
+      showToast('Please enter your Full Name.', 'error');
+      return;
+    }
+    if (!isValidIndianMobile(cleanRegPhone)) {
+      showToast('Enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.', 'error');
+      return;
+    }
+    if (!isRegPhoneOtpVerified) {
+      showToast('Please verify your Mobile Number via SMS OTP before submitting.', 'error');
+      return;
+    }
+    if (!regPincodeResult?.valid) {
+      showToast('Please enter a valid 6-digit Indian Pincode verified by India Post.', 'error');
+      return;
+    }
+    if (!isRegVehicleValid) {
+      showToast('Enter a valid Indian RTO Vehicle Number (e.g., DL01AB1234).', 'error');
+      return;
+    }
+    if (!isRegAadhaarValid) {
+      showToast('Invalid 12-digit Aadhaar Number (failed official Verhoeff checksum).', 'error');
+      return;
+    }
+    if (!regAadhaarPhoto || !regDlPhoto || !regSelfiePhoto) {
+      showToast('Please capture live camera photos of Aadhaar, Driving License, and Live Selfie.', 'error');
+      return;
+    }
+    if (!isRegPinValid) {
+      showToast('Please create a 4-digit numeric Login PIN.', 'error');
+      return;
+    }
+
+    const postOfficeName = regSelectedPostOffice || regPincodeResult.postOffice || '';
+    const resolvedAreaPincode = `${postOfficeName ? `${postOfficeName}, ` : ''}${
+      regPincodeResult.district || ''
+    }, ${regPincodeResult.state || ''} - ${regPincodeResult.pincode}`;
+
     setSubmittingKyc(true);
     const res = await submitRiderKycApplicationFirestore({
       name: regName,
-      phone: regPhone,
+      phone: cleanRegPhone,
       email: regEmail,
-      areaPincode: regAreaPincode,
+      areaPincode: resolvedAreaPincode,
       vehicleType: regVehicleType,
-      vehicleNumber: regVehicleNumber,
+      vehicleNumber: regVehicleNumber.trim().toUpperCase(),
       aadhaarNumber: regAadhaarNumber,
       aadhaarPhoto: regAadhaarPhoto,
       drivingLicensePhoto: regDlPhoto,
@@ -543,11 +608,11 @@ export const RiderView: React.FC<RiderViewProps> = ({
               </div>
 
               <form onSubmit={handleKycSubmit} className="p-5 sm:p-6 space-y-4">
-                {/* Personal & Area Details */}
+                {/* Personal Details */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                   <div>
                     <label className="block text-xs font-bold text-gray-700 mb-1">
-                      Full Name *
+                      Full Name <span className="text-rose-500">*</span>
                     </label>
                     <input
                       type="text"
@@ -555,37 +620,7 @@ export const RiderView: React.FC<RiderViewProps> = ({
                       value={regName}
                       onChange={(e) => setRegName(e.target.value)}
                       placeholder="e.g., Rahul Sharma"
-                      className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm focus:ring-2 focus:ring-[#2874F0] outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-gray-700 mb-1">
-                      10-Digit Mobile Number *
-                    </label>
-                    <input
-                      type="tel"
-                      required
-                      maxLength={10}
-                      value={regPhone}
-                      onChange={(e) => setRegPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
-                      placeholder="9876543210"
-                      className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm focus:ring-2 focus:ring-[#2874F0] outline-none"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                  <div>
-                    <label className="block text-xs font-bold text-gray-700 mb-1">
-                      Area / Pincode *
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={regAreaPincode}
-                      onChange={(e) => setRegAreaPincode(e.target.value)}
-                      placeholder="e.g., Bawana 110039"
-                      className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm focus:ring-2 focus:ring-[#2874F0] outline-none"
+                      className="w-full h-11 px-3 rounded-lg border border-gray-300 text-sm focus:ring-2 focus:ring-[#2874F0] outline-none"
                     />
                   </div>
                   <div>
@@ -597,21 +632,41 @@ export const RiderView: React.FC<RiderViewProps> = ({
                       value={regEmail}
                       onChange={(e) => setRegEmail(e.target.value)}
                       placeholder="rider@email.com"
-                      className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm focus:ring-2 focus:ring-[#2874F0] outline-none"
+                      className="w-full h-11 px-3 rounded-lg border border-gray-300 text-sm focus:ring-2 focus:ring-[#2874F0] outline-none"
                     />
                   </div>
                 </div>
 
-                {/* Vehicle Details */}
+                {/* Mandatory Firebase Phone SMS OTP Verification */}
+                <PhoneOtpField
+                  label="10-Digit Indian Mobile Number"
+                  phone={regPhone}
+                  onPhoneChange={setRegPhone}
+                  verifiedPhone={regVerifiedPhone}
+                  onVerifiedChange={setRegVerifiedPhone}
+                  onToast={showToast}
+                />
+
+                {/* Strict India Post 6-Digit Pincode Lookup */}
+                <IndianPincodeField
+                  label="Delivery Area 6-Digit Pincode"
+                  pincode={regPincode}
+                  onPincodeChange={setRegPincode}
+                  selectedPostOffice={regSelectedPostOffice}
+                  onSelectedPostOfficeChange={setRegSelectedPostOffice}
+                  onLookupResult={setRegPincodeResult}
+                />
+
+                {/* Vehicle Details with Strict Indian RTO Format Validation */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                   <div>
                     <label className="block text-xs font-bold text-gray-700 mb-1">
-                      Vehicle Type *
+                      Vehicle Type <span className="text-rose-500">*</span>
                     </label>
                     <select
                       value={regVehicleType}
                       onChange={(e) => setRegVehicleType(e.target.value)}
-                      className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm bg-white focus:ring-2 focus:ring-[#2874F0] outline-none"
+                      className="w-full h-11 px-3 rounded-lg border border-gray-300 text-sm bg-white focus:ring-2 focus:ring-[#2874F0] outline-none"
                     >
                       {VEHICLE_TYPES.map((vt) => (
                         <option key={vt} value={vt}>
@@ -621,26 +676,55 @@ export const RiderView: React.FC<RiderViewProps> = ({
                     </select>
                   </div>
                   <div>
-                    <label className="block text-xs font-bold text-gray-700 mb-1">
-                      Vehicle Number *
-                    </label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-xs font-bold text-gray-700">
+                        Vehicle Number (RTO) <span className="text-rose-500">*</span>
+                      </label>
+                      {regVehicleNumber.trim().length > 0 && isRegVehicleValid && (
+                        <span className="text-[10px] font-extrabold text-emerald-700">
+                          Valid RTO ✓
+                        </span>
+                      )}
+                    </div>
                     <input
                       type="text"
                       required
+                      maxLength={15}
                       value={regVehicleNumber}
-                      onChange={(e) => setRegVehicleNumber(e.target.value.toUpperCase())}
-                      placeholder="e.g., DL 08 AB 1234"
-                      className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm uppercase focus:ring-2 focus:ring-[#2874F0] outline-none"
+                      onChange={(e) =>
+                        setRegVehicleNumber(e.target.value.toUpperCase().replace(/[^A-Z0-9 -]/g, ''))
+                      }
+                      placeholder="e.g., DL01AB1234"
+                      className={`w-full h-11 px-3 rounded-lg border text-sm font-mono uppercase focus:outline-none transition ${
+                        regVehicleNumber.trim().length === 0
+                          ? 'border-gray-300 focus:ring-2 focus:ring-[#2874F0]'
+                          : isRegVehicleValid
+                          ? 'border-emerald-400 bg-emerald-50/40 text-emerald-950'
+                          : 'border-rose-400 bg-rose-50/40 text-rose-900'
+                      }`}
                     />
+                    {regVehicleNumber.trim().length > 0 && !isRegVehicleValid && (
+                      <p className="mt-1 text-[11px] font-semibold text-rose-600 flex items-start gap-1">
+                        <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                        <span>Use official Indian RTO format (e.g., DL01AB1234 or MH 12 DE 1433).</span>
+                      </p>
+                    )}
                   </div>
                 </div>
 
-                {/* Aadhaar Number & 4-Digit Login PIN */}
+                {/* Aadhaar Number (Verhoeff Checksum) & 4-Digit Login PIN */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                   <div>
-                    <label className="block text-xs font-bold text-gray-700 mb-1">
-                      12-Digit Aadhaar Number *
-                    </label>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-xs font-bold text-gray-700">
+                        12-Digit Aadhaar Number <span className="text-rose-500">*</span>
+                      </label>
+                      {isRegAadhaarValid && (
+                        <span className="text-[10px] font-extrabold text-emerald-700">
+                          Verhoeff Valid ✓
+                        </span>
+                      )}
+                    </div>
                     <input
                       type="text"
                       inputMode="numeric"
@@ -648,13 +732,35 @@ export const RiderView: React.FC<RiderViewProps> = ({
                       maxLength={12}
                       value={regAadhaarNumber}
                       onChange={(e) => setRegAadhaarNumber(e.target.value.replace(/\D/g, '').slice(0, 12))}
-                      placeholder="123456789012"
-                      className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm font-mono tracking-wider focus:ring-2 focus:ring-[#2874F0] outline-none"
+                      placeholder="12-digit UIDAI Aadhaar"
+                      className={`w-full h-11 px-3 rounded-lg border text-sm font-mono tracking-wider focus:outline-none transition ${
+                        regAadhaarNumber.length === 0
+                          ? 'border-gray-300 focus:ring-2 focus:ring-[#2874F0]'
+                          : isRegAadhaarValid
+                          ? 'border-emerald-400 bg-emerald-50/40 text-emerald-950'
+                          : regAadhaarNumber.length === 12 || /^[01]/.test(regAadhaarNumber)
+                          ? 'border-rose-400 bg-rose-50/40 text-rose-900'
+                          : 'border-gray-300 focus:ring-2 focus:ring-[#2874F0]'
+                      }`}
                     />
+                    {regAadhaarNumber.length > 0 && /^[01]/.test(regAadhaarNumber) && (
+                      <p className="mt-1 text-[11px] font-semibold text-rose-600 flex items-start gap-1">
+                        <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                        <span>Aadhaar numbers cannot start with 0 or 1.</span>
+                      </p>
+                    )}
+                    {regAadhaarNumber.length === 12 &&
+                      !/^[01]/.test(regAadhaarNumber) &&
+                      !isRegAadhaarValid && (
+                        <p className="mt-1 text-[11px] font-semibold text-rose-600 flex items-start gap-1">
+                          <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                          <span>Invalid Aadhaar number — failed official Verhoeff checksum.</span>
+                        </p>
+                      )}
                   </div>
                   <div>
                     <label className="block text-xs font-bold text-gray-700 mb-1">
-                      Create 4-Digit Login PIN *
+                      Create 4-Digit Login PIN <span className="text-rose-500">*</span>
                     </label>
                     <input
                       type="password"
@@ -664,27 +770,36 @@ export const RiderView: React.FC<RiderViewProps> = ({
                       value={regPin}
                       onChange={(e) => setRegPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
                       placeholder="••••"
-                      className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm font-mono tracking-[0.35em] focus:ring-2 focus:ring-[#2874F0] outline-none"
+                      className="w-full h-11 px-3 rounded-lg border border-gray-300 text-sm font-mono tracking-[0.35em] focus:ring-2 focus:ring-[#2874F0] outline-none"
                     />
                   </div>
                 </div>
 
-                {/* KYC Document Uploads */}
+                {/* Mandatory Live Camera KYC Capture */}
                 <div className="pt-2 border-t border-gray-100">
-                  <div className="flex items-center gap-2 mb-3">
-                    <FileCheck2 className="w-4 h-4 text-[#2874F0]" />
-                    <h3 className="text-xs font-extrabold uppercase tracking-wide text-gray-800">
-                      KYC Document Uploads (Required)
-                    </h3>
+                  <div className="flex items-center justify-between gap-2 mb-1.5">
+                    <div className="flex items-center gap-2">
+                      <Camera className="w-4 h-4 text-[#2874F0]" />
+                      <h3 className="text-xs font-extrabold uppercase tracking-wide text-gray-800">
+                        Live Camera KYC Capture (Required)
+                      </h3>
+                    </div>
+                    <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-50 text-[#2874F0]">
+                      Camera Only
+                    </span>
                   </div>
+                  <p className="text-[11px] text-gray-500 mb-3">
+                    Capture real-time photos using your device camera — rear camera for Aadhaar &amp; Driving License, front camera for Live Selfie.
+                  </p>
 
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    {/* Aadhaar Card Photo */}
+                    {/* Aadhaar Card Live Rear Camera Photo */}
                     <div className="border-2 border-dashed border-gray-200 rounded-xl p-3 text-center bg-gray-50/70">
                       <input
                         ref={aadhaarInputRef}
                         type="file"
                         accept="image/*"
+                        capture="environment"
                         className="hidden"
                         onChange={(e) => handlePhotoUpload(e, setRegAadhaarPhoto, 'Aadhaar Card Photo')}
                       />
@@ -692,15 +807,15 @@ export const RiderView: React.FC<RiderViewProps> = ({
                         <div className="relative">
                           <img
                             src={regAadhaarPhoto}
-                            alt="Aadhaar preview"
-                            className="w-full h-24 object-cover rounded-lg border border-gray-200"
+                            alt="Aadhaar live capture preview"
+                            className="w-full h-24 object-cover rounded-lg border border-emerald-300"
                           />
                           <button
                             type="button"
                             onClick={() => aadhaarInputRef.current?.click()}
                             className="mt-2 w-full py-1 rounded bg-white border border-gray-200 text-[11px] font-bold text-[#2874F0]"
                           >
-                            Change Aadhaar
+                            Retake Aadhaar
                           </button>
                         </div>
                       ) : (
@@ -710,20 +825,21 @@ export const RiderView: React.FC<RiderViewProps> = ({
                           className="w-full py-4 flex flex-col items-center justify-center gap-1.5 text-gray-600 hover:text-[#2874F0]"
                         >
                           <IdCard className="w-6 h-6 text-[#2874F0]" />
-                          <span className="text-xs font-bold">Aadhaar Photo</span>
-                          <span className="text-[10px] text-gray-400 flex items-center gap-1">
-                            <Upload className="w-3 h-3" /> Tap to upload
+                          <span className="text-xs font-bold">Aadhaar Card</span>
+                          <span className="text-[10px] text-gray-500 flex items-center gap-1 font-semibold">
+                            <Camera className="w-3 h-3" /> Take Live Photo
                           </span>
                         </button>
                       )}
                     </div>
 
-                    {/* Driving License Photo */}
+                    {/* Driving License Live Rear Camera Photo */}
                     <div className="border-2 border-dashed border-gray-200 rounded-xl p-3 text-center bg-gray-50/70">
                       <input
                         ref={dlInputRef}
                         type="file"
                         accept="image/*"
+                        capture="environment"
                         className="hidden"
                         onChange={(e) => handlePhotoUpload(e, setRegDlPhoto, 'Driving License Photo')}
                       />
@@ -731,15 +847,15 @@ export const RiderView: React.FC<RiderViewProps> = ({
                         <div className="relative">
                           <img
                             src={regDlPhoto}
-                            alt="Driving License preview"
-                            className="w-full h-24 object-cover rounded-lg border border-gray-200"
+                            alt="Driving License live capture preview"
+                            className="w-full h-24 object-cover rounded-lg border border-emerald-300"
                           />
                           <button
                             type="button"
                             onClick={() => dlInputRef.current?.click()}
                             className="mt-2 w-full py-1 rounded bg-white border border-gray-200 text-[11px] font-bold text-[#2874F0]"
                           >
-                            Change License
+                            Retake License
                           </button>
                         </div>
                       ) : (
@@ -750,14 +866,14 @@ export const RiderView: React.FC<RiderViewProps> = ({
                         >
                           <FileCheck2 className="w-6 h-6 text-emerald-600" />
                           <span className="text-xs font-bold">Driving License</span>
-                          <span className="text-[10px] text-gray-400 flex items-center gap-1">
-                            <Upload className="w-3 h-3" /> Tap to upload
+                          <span className="text-[10px] text-gray-500 flex items-center gap-1 font-semibold">
+                            <Camera className="w-3 h-3" /> Take Live Photo
                           </span>
                         </button>
                       )}
                     </div>
 
-                    {/* Live Selfie */}
+                    {/* Live Front Camera Selfie */}
                     <div className="border-2 border-dashed border-gray-200 rounded-xl p-3 text-center bg-gray-50/70">
                       <input
                         ref={selfieInputRef}
@@ -772,7 +888,7 @@ export const RiderView: React.FC<RiderViewProps> = ({
                           <img
                             src={regSelfiePhoto}
                             alt="Live Selfie preview"
-                            className="w-full h-24 object-cover rounded-lg border border-gray-200"
+                            className="w-full h-24 object-cover rounded-lg border border-emerald-300"
                           />
                           <button
                             type="button"
@@ -790,8 +906,8 @@ export const RiderView: React.FC<RiderViewProps> = ({
                         >
                           <Camera className="w-6 h-6 text-[#FB641B]" />
                           <span className="text-xs font-bold">Live Selfie</span>
-                          <span className="text-[10px] text-gray-400 flex items-center gap-1">
-                            <Camera className="w-3 h-3" /> Capture / Upload
+                          <span className="text-[10px] text-gray-500 flex items-center gap-1 font-semibold">
+                            <Camera className="w-3 h-3" /> Capture Live Selfie
                           </span>
                         </button>
                       )}
@@ -799,13 +915,44 @@ export const RiderView: React.FC<RiderViewProps> = ({
                   </div>
                 </div>
 
+                {/* Live KYC Verification Checklist */}
+                <div className="rounded-xl bg-slate-50 border border-slate-200 p-3.5 space-y-2">
+                  <p className="text-[11px] font-extrabold uppercase tracking-wide text-slate-600">
+                    Mandatory Verification Checklist
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[11px] font-semibold">
+                    {[
+                      { label: 'Mobile Verified via SMS OTP', ok: isRegPhoneOtpVerified },
+                      { label: 'India Post Pincode Verified', ok: isRegPincodeVerified },
+                      { label: 'Valid Indian RTO Vehicle No.', ok: isRegVehicleValid },
+                      { label: 'Aadhaar Verhoeff Checksum Valid', ok: isRegAadhaarValid },
+                      { label: 'All 3 Live Camera KYC Photos', ok: hasAllKycPhotos },
+                      { label: '4-Digit Login PIN Created', ok: isRegPinValid },
+                    ].map((item) => (
+                      <div
+                        key={item.label}
+                        className={`flex items-center gap-1.5 ${
+                          item.ok ? 'text-emerald-700' : 'text-slate-500'
+                        }`}
+                      >
+                        <CheckCircle2
+                          className={`w-3.5 h-3.5 shrink-0 ${
+                            item.ok ? 'text-emerald-600' : 'text-slate-300'
+                          }`}
+                        />
+                        <span>{item.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
                 <button
                   type="submit"
-                  disabled={submittingKyc}
-                  className="w-full py-3.5 rounded-xl bg-[#FB641B] hover:bg-[#e55a14] text-white font-extrabold text-sm shadow-md transition disabled:opacity-60 flex items-center justify-center gap-2"
+                  disabled={submittingKyc || !canSubmitKyc}
+                  className="w-full py-3.5 rounded-xl bg-[#FB641B] hover:bg-[#e55a14] text-white font-extrabold text-sm shadow-md transition disabled:bg-slate-300 disabled:text-slate-500 disabled:shadow-none disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 >
                   <ShieldCheck className="w-4 h-4" />
-                  {submittingKyc ? 'Submitting KYC Application...' : 'Submit KYC & Join Fleet'}
+                  {submittingKyc ? 'Submitting KYC Application...' : 'Submit Verified KYC & Join Fleet'}
                 </button>
               </form>
             </div>
