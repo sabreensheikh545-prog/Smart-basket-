@@ -33,9 +33,46 @@ export interface User {
   address: string;
   status: 'active' | 'blocked';
   created_at: string;
-  role?: 'customer' | 'seller' | 'admin';
+  role?: 'customer' | 'seller' | 'admin' | 'rider';
   isSeller?: boolean;
   sellerStoreName?: string;
+}
+
+export type RiderKycStatus = 'pending_kyc' | 'approved' | 'rejected';
+
+export interface RiderCashSettlement {
+  id: string;
+  amount: number;
+  settledAt: string;
+  note?: string;
+}
+
+export interface DeliveryBoy {
+  id: string;
+  docId?: string;
+  riderId: string;
+  name: string;
+  phone: string;
+  email: string;
+  password: string;
+  vehicleType?: string;
+  vehicleNumber?: string;
+  areaPincode?: string;
+  vehicleArea: string;
+  aadhaarNumber?: string;
+  aadhaarPhoto?: string;
+  drivingLicensePhoto?: string;
+  selfiePhoto?: string;
+  kycStatus: RiderKycStatus;
+  kycSubmittedAt?: string;
+  kycReviewedAt?: string;
+  kycRejectionReason?: string;
+  codCashInHand: number;
+  totalCodSettled?: number;
+  lastCashSettledAt?: string;
+  cashSettlementHistory?: RiderCashSettlement[];
+  status: 'active' | 'inactive';
+  created_at: string;
 }
 
 export interface SavedAddress {
@@ -132,10 +169,12 @@ export type OrderStatus =
   | 'Cancelled';
 
 export const COURIER_PARTNERS = [
-  'Delhivery',
   'Shiprocket',
-  'India Post',
+  'Porter',
+  'Delhivery',
+  'Borzo',
   'BlueDart',
+  'India Post',
   'Local Rider',
 ] as const;
 
@@ -186,6 +225,21 @@ export interface Order {
   items: OrderItem[];
   sellerIds?: string[];
   sellerEmails?: string[];
+  pincode?: string;
+  dispatchMode?: 'rider' | 'courier';
+  deliveryBoyId?: string;
+  deliveryBoyName?: string;
+  deliveryBoyPhone?: string;
+  deliveryBoyEmail?: string;
+  deliveryBoyVehicle?: string;
+  deliveryAssignedAt?: string;
+  deliveryOutForDeliveryAt?: string;
+  deliveredAt?: string;
+  deliveryOtp?: string;
+  deliveryOtpVerified?: boolean;
+  riderLiveLat?: number;
+  riderLiveLng?: number;
+  riderLocationUpdatedAt?: string;
 }
 
 export interface CartEntry {
@@ -271,6 +325,12 @@ export function getCourierTrackingUrl(
   if (courier.includes('india post') || courier.includes('indiapost')) {
     return `https://www.indiapost.gov.in/_layouts/15/dop.portal.tracking/trackconsignment.aspx`;
   }
+  if (courier.includes('porter')) {
+    return `https://porter.in/track?order_id=${encodedAwb}`;
+  }
+  if (courier.includes('borzo')) {
+    return `https://borzodelivery.com/in/track/${encodedAwb}`;
+  }
   return `https://www.google.com/search?q=${encodeURIComponent(`${courierName || 'courier'} tracking ${awb}`)}`;
 }
 
@@ -295,3 +355,49 @@ export function getDiscountPercent(price: number, mrp?: number): number {
 export function getEffectiveMrp(price: number, mrp?: number): number {
   return mrp && mrp > price ? mrp : Math.round((price * 1.35) / 10) * 10 - 1;
 }
+
+export function generateDeliveryOtp(): string {
+  return String(Math.floor(1000 + Math.random() * 9000));
+}
+
+export function extractPincodeFromAddress(address?: string, explicitPincode?: string): string {
+  const cleanExplicit = (explicitPincode || '').replace(/\D/g, '').slice(0, 6);
+  if (cleanExplicit.length === 6) return cleanExplicit;
+  const match = (address || '').match(/\b([1-9]\d{5})\b/);
+  return match ? match[1] : '';
+}
+
+export function isOnlinePaidOrder(order: Pick<Order, 'paymentMethod'>): boolean {
+  const pm = (order.paymentMethod || '').trim().toLowerCase();
+  if (!pm) return false;
+  if (pm.includes('cash on delivery') || pm === 'cod' || pm.includes('(cod)')) return false;
+  return (
+    pm.includes('razorpay') ||
+    pm.includes('online') ||
+    pm.includes('prepaid') ||
+    pm.includes('paid') ||
+    pm.includes('upi') ||
+    pm.includes('card') ||
+    pm.includes('netbanking')
+  );
+}
+
+export function getOrderDeliveryStage(order: Order): 'Assigned' | 'Out for Delivery' | 'Delivered' | null {
+  if (!order.deliveryBoyId && !order.deliveryBoyName) return null;
+  if (
+    order.status === 'Delivered' ||
+    order.status === 'Return Requested' ||
+    order.status === 'Return Approved' ||
+    order.status === 'Refunded'
+  ) {
+    return 'Delivered';
+  }
+  if (order.status === 'Out for Delivery') {
+    return 'Out for Delivery';
+  }
+  if (order.status === 'Cancelled') {
+    return null;
+  }
+  return 'Assigned';
+}
+

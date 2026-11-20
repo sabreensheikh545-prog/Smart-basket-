@@ -1,15 +1,23 @@
 import React, { useEffect, useState } from 'react';
 import {
+  assignOrderRiderFirestore,
   deleteCategoryFirestore,
+  deleteDeliveryBoyFirestore,
   deleteProductFirestore,
   deleteUserFirestore,
   filterOrderForSeller,
   markSellerPayoutPaidFirestore,
+  reviewRiderKycFirestore,
   saveCategoryFirestore,
+  saveDeliveryBoyFirestore,
   saveProductFirestore,
+  settleRiderCodCashFirestore,
+  shipOrderViaCourierFirestore,
   subscribeAllOrdersFirestore,
   subscribeAllSellersFirestore,
   subscribeAllUsersFirestore,
+  subscribeDeliveryBoysFirestore,
+  toggleDeliveryBoyStatusFirestore,
   toggleUserBlockFirestore,
   updateOrderStatusFirestore,
   updateOrderTrackingFirestore,
@@ -19,6 +27,7 @@ import {
   ASSETS,
   IMAGE_CHOICES,
   getBootstrapData,
+  getStoredDeliveryBoysLocal,
   getStoredSellersLocal,
   loginAdminLocal,
   saveProductLocal,
@@ -28,6 +37,7 @@ import {
 import {
   COURIER_PARTNERS,
   Category,
+  DeliveryBoy,
   ORDER_STATUS_OPTIONS,
   Order,
   OrderStatus,
@@ -36,6 +46,7 @@ import {
   User,
   calculateSellerEarnings,
   formatINR,
+  generateDeliveryOtp,
   getCourierTrackingUrl,
   getEffectiveMrp,
   getOrderStatusLabel,
@@ -43,7 +54,16 @@ import {
   normalizeSellerStatus,
 } from '../types';
 
-type AdminTab = 'dashboard' | 'categories' | 'products' | 'orders' | 'order_detail' | 'sellers' | 'users' | 'settings';
+type AdminTab =
+  | 'dashboard'
+  | 'categories'
+  | 'products'
+  | 'orders'
+  | 'order_detail'
+  | 'delivery_boys'
+  | 'sellers'
+  | 'users'
+  | 'settings';
 
 function compressImageFileToDataUrl(file: File, maxDimension = 500, quality = 0.7): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -129,6 +149,7 @@ export const AdminView: React.FC<Props> = ({
   const [liveOrders, setLiveOrders] = useState<Order[]>(orders);
   const [liveUsers, setLiveUsers] = useState<User[]>(users);
   const [liveSellers, setLiveSellers] = useState<SellerProfile[]>(() => getStoredSellersLocal());
+  const [liveDeliveryBoys, setLiveDeliveryBoys] = useState<DeliveryBoy[]>(() => getStoredDeliveryBoysLocal());
 
   // Admin Login Form
   const [loginUser, setLoginUser] = useState('Seraj');
@@ -156,11 +177,33 @@ export const AdminView: React.FC<Props> = ({
 
   // Order Detail Status & Real-World Courier Tracking Drafts
   const [orderStatusDraft, setOrderStatusDraft] = useState<OrderStatus>('Confirmed');
-  const [trackingCourierDraft, setTrackingCourierDraft] = useState<string>('Delhivery');
+  const [trackingCourierDraft, setTrackingCourierDraft] = useState<string>('Shiprocket');
   const [trackingIdDraft, setTrackingIdDraft] = useState<string>('');
   const [trackingUrlDraft, setTrackingUrlDraft] = useState<string>('');
   const [trackingNoteDraft, setTrackingNoteDraft] = useState<string>('');
   const [trackingModalOrder, setTrackingModalOrder] = useState<Order | null>(null);
+
+  // Hybrid Dispatch: Ship via Courier Modal State
+  const [courierShipModalOrder, setCourierShipModalOrder] = useState<Order | null>(null);
+  const [shipCourierPartner, setShipCourierPartner] = useState<string>('Shiprocket');
+  const [shipCustomCourier, setShipCustomCourier] = useState<string>('');
+  const [shipAwbNumber, setShipAwbNumber] = useState<string>('');
+  const [shipTrackingUrl, setShipTrackingUrl] = useState<string>('');
+  const [shipTrackingNote, setShipTrackingNote] = useState<string>('');
+
+  // Delivery Boy Add/Edit Modal State
+  const [riderModalOpen, setRiderModalOpen] = useState(false);
+  const [editingRider, setEditingRider] = useState<DeliveryBoy | null>(null);
+  const [riderName, setRiderName] = useState('');
+  const [riderPhone, setRiderPhone] = useState('');
+  const [riderEmail, setRiderEmail] = useState('');
+  const [riderIdInput, setRiderIdInput] = useState('');
+  const [riderPassword, setRiderPassword] = useState('');
+  const [riderVehicleArea, setRiderVehicleArea] = useState('');
+  const [riderStatusDraft, setRiderStatusDraft] = useState<'active' | 'inactive'>('active');
+
+  // KYC Document Lightbox Preview
+  const [kycLightbox, setKycLightbox] = useState<{ title: string; subtitle: string; src: string } | null>(null);
 
   // Admin Settings
   const [settingsUser, setSettingsUser] = useState(adminUsername);
@@ -177,10 +220,12 @@ export const AdminView: React.FC<Props> = ({
       (errMsg) => showModal({ title: 'Users Sync Notice', message: errMsg, type: 'error' })
     );
     const unsubSellers = subscribeAllSellersFirestore((list) => setLiveSellers(list));
+    const unsubRiders = subscribeDeliveryBoysFirestore((list) => setLiveDeliveryBoys(list));
     return () => {
       unsubOrders();
       unsubUsers();
       unsubSellers();
+      unsubRiders();
     };
   }, [isAdminLoggedIn, showModal]);
 
@@ -268,6 +313,11 @@ export const AdminView: React.FC<Props> = ({
   const pendingSellersCount = liveSellers.filter((s) => normalizeSellerStatus(s.status) === 'pending').length;
   const pendingPayoutSellersCount = liveSellers.filter((s) => Number(s.pendingPayoutAmount || 0) > 0).length;
   const sellerAttentionCount = pendingSellersCount + pendingPayoutSellersCount;
+  const pendingKycRiders = liveDeliveryBoys.filter((r) => r.kycStatus === 'pending_kyc');
+  const approvedRiders = liveDeliveryBoys.filter((r) => r.kycStatus === 'approved');
+  const rejectedKycRiders = liveDeliveryBoys.filter((r) => r.kycStatus === 'rejected');
+  const activeApprovedRiders = approvedRiders.filter((r) => r.status === 'active');
+  const totalCodCashInHand = approvedRiders.reduce((sum, r) => sum + Number(r.codCashInHand || 0), 0);
   const activeOrder = liveOrders.find((o) => o.id === selectedOrderId) || null;
 
   const openCategoryModal = (cat?: Category) => {
@@ -479,6 +529,227 @@ export const AdminView: React.FC<Props> = ({
     }
   };
 
+  // Hybrid Logistics Handlers (Delivery Boys, KYC Approval, COD Cash Settlement, Rider/Courier Dispatch)
+  const openRiderModal = (rider?: DeliveryBoy) => {
+    setEditingRider(rider || null);
+    setRiderName(rider ? rider.name : '');
+    setRiderPhone(rider ? rider.phone : '');
+    setRiderEmail(rider ? rider.email : '');
+    setRiderIdInput(rider ? rider.riderId : `RDR-${Math.floor(1000 + Math.random() * 9000)}`);
+    setRiderPassword(rider ? rider.password : '');
+    setRiderVehicleArea(rider ? rider.vehicleArea : '');
+    setRiderStatusDraft(rider ? rider.status : 'active');
+    setRiderModalOpen(true);
+  };
+
+  const handleSaveRider = async (e: React.FormEvent) => {
+    e.preventDefault();
+    showLoader('Saving delivery partner...');
+    const res = await saveDeliveryBoyFirestore({
+      id: editingRider?.id,
+      docId: editingRider?.docId,
+      riderId: riderIdInput,
+      name: riderName,
+      phone: riderPhone,
+      email: riderEmail,
+      password: riderPassword,
+      vehicleArea: riderVehicleArea,
+      kycStatus: editingRider?.kycStatus || 'approved',
+      status: riderStatusDraft,
+    });
+    hideLoader();
+    if (res.success && res.rider) {
+      setLiveDeliveryBoys(getStoredDeliveryBoysLocal());
+      setRiderModalOpen(false);
+      showModal({ title: 'Delivery Partner Saved', message: res.message, type: 'success' });
+    } else {
+      showModal({ title: 'Validation Error', message: res.message, type: 'error' });
+    }
+  };
+
+  const handleReviewRiderKyc = async (rider: DeliveryBoy, decision: 'approved' | 'rejected') => {
+    showLoader(decision === 'approved' ? 'Approving KYC...' : 'Rejecting KYC...');
+    const res = await reviewRiderKycFirestore(rider, decision);
+    hideLoader();
+    setLiveDeliveryBoys(getStoredDeliveryBoysLocal());
+    showModal({
+      title: decision === 'approved' ? 'Rider KYC Approved' : 'Rider KYC Rejected',
+      message: res.message,
+      type: decision === 'approved' ? 'success' : 'info',
+    });
+  };
+
+  const handleToggleRiderStatus = async (rider: DeliveryBoy) => {
+    const nextStatus = rider.status === 'active' ? 'inactive' : 'active';
+    showLoader('Updating rider status...');
+    const res = await toggleDeliveryBoyStatusFirestore(rider, nextStatus);
+    hideLoader();
+    setLiveDeliveryBoys(getStoredDeliveryBoysLocal());
+    showModal({ title: 'Status Updated', message: res.message, type: 'success' });
+  };
+
+  const handleDeleteRider = (rider: DeliveryBoy) => {
+    showModal({
+      title: 'Remove Delivery Partner',
+      message: `Remove ${rider.name} (${rider.riderId}) from your delivery fleet?`,
+      type: 'error',
+      confirmText: 'Remove',
+      onConfirm: async () => {
+        showLoader('Removing...');
+        await deleteDeliveryBoyFirestore(rider);
+        hideLoader();
+        setLiveDeliveryBoys(getStoredDeliveryBoysLocal());
+      },
+    });
+  };
+
+  const handleSettleRiderCash = (rider: DeliveryBoy) => {
+    const cash = Number(rider.codCashInHand || 0);
+    if (cash <= 0) {
+      showModal({
+        title: 'No Cash Pending',
+        message: `${rider.name} has ₹0 COD cash in hand to settle.`,
+        type: 'info',
+      });
+      return;
+    }
+    showModal({
+      title: 'Settle Rider COD Cash',
+      message: `Confirm you have collected ${formatINR(cash)} COD cash from ${rider.name} (${rider.riderId})? This will reset their COD Cash in Hand to ₹0.`,
+      type: 'info',
+      confirmText: 'Confirm & Settle Cash',
+      onConfirm: async () => {
+        showLoader('Settling COD cash...');
+        const res = await settleRiderCodCashFirestore(rider, `Collected by ${adminUsername}`);
+        hideLoader();
+        setLiveDeliveryBoys(getStoredDeliveryBoysLocal());
+        showModal({
+          title: res.success ? 'COD Cash Settled' : 'Error',
+          message: res.message,
+          type: res.success ? 'success' : 'error',
+        });
+      },
+    });
+  };
+
+  const handleAssignOrderRider = async (ord: Order, riderIdValue: string) => {
+    const chosen = riderIdValue
+      ? activeApprovedRiders.find((r) => (r.docId || r.id) === riderIdValue) || null
+      : null;
+    showLoader(chosen ? `Assigning ${chosen.name}...` : 'Unassigning rider...');
+    const res = await assignOrderRiderFirestore(ord, chosen);
+    hideLoader();
+    if (res.success) {
+      const otpVal = res.otp || ord.deliveryOtp || generateDeliveryOtp();
+      setLiveOrders((prev) =>
+        prev.map((o) =>
+          o.id === ord.id
+            ? chosen
+              ? {
+                  ...o,
+                  dispatchMode: 'rider',
+                  deliveryBoyId: chosen.docId || chosen.id,
+                  deliveryBoyName: chosen.name,
+                  deliveryBoyPhone: chosen.phone,
+                  deliveryBoyEmail: chosen.email || undefined,
+                  deliveryBoyVehicle: chosen.vehicleArea,
+                  deliveryOtp: otpVal,
+                  courierName: 'Smart Basket Rider',
+                }
+              : {
+                  ...o,
+                  dispatchMode: o.trackingId ? 'courier' : undefined,
+                  deliveryBoyId: undefined,
+                  deliveryBoyName: undefined,
+                  deliveryBoyPhone: undefined,
+                  deliveryBoyEmail: undefined,
+                  deliveryBoyVehicle: undefined,
+                  riderLiveLat: undefined,
+                  riderLiveLng: undefined,
+                }
+            : o
+        )
+      );
+      onRefresh();
+      showModal({
+        title: chosen ? 'Rider Assigned' : 'Rider Unassigned',
+        message: res.message,
+        type: 'success',
+      });
+    } else {
+      showModal({ title: 'Assignment Error', message: res.message, type: 'error' });
+    }
+  };
+
+  const openCourierShipModal = (ord: Order) => {
+    setCourierShipModalOrder(ord);
+    const known = ['Shiprocket', 'Porter', 'Delhivery', 'Borzo', 'BlueDart', 'India Post'];
+    if (ord.courierName && known.includes(ord.courierName)) {
+      setShipCourierPartner(ord.courierName);
+      setShipCustomCourier('');
+    } else if (ord.courierName && ord.courierName !== 'Smart Basket Rider') {
+      setShipCourierPartner('Other');
+      setShipCustomCourier(ord.courierName);
+    } else {
+      setShipCourierPartner('Shiprocket');
+      setShipCustomCourier('');
+    }
+    setShipAwbNumber(ord.trackingId || '');
+    setShipTrackingUrl(ord.trackingUrl || '');
+    setShipTrackingNote(ord.trackingNote || '');
+  };
+
+  const handleShipViaCourierSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!courierShipModalOrder) return;
+    const resolvedPartner =
+      shipCourierPartner === 'Other' ? shipCustomCourier.trim() : shipCourierPartner.trim();
+    if (!resolvedPartner || !shipAwbNumber.trim()) {
+      showModal({
+        title: 'Missing Details',
+        message: 'Please enter both the Courier Partner Name and AWB Tracking Number.',
+        type: 'error',
+      });
+      return;
+    }
+
+    showLoader(`Shipping via ${resolvedPartner}...`);
+    const res = await shipOrderViaCourierFirestore(courierShipModalOrder, {
+      courierName: resolvedPartner,
+      trackingId: shipAwbNumber.trim(),
+      trackingUrl: shipTrackingUrl.trim(),
+      trackingNote: shipTrackingNote.trim(),
+    });
+    hideLoader();
+    if (res.success) {
+      setLiveOrders((prev) =>
+        prev.map((o) =>
+          o.id === courierShipModalOrder.id
+            ? {
+                ...o,
+                dispatchMode: 'courier',
+                status: 'Shipped',
+                courierName: resolvedPartner,
+                trackingId: shipAwbNumber.trim(),
+                trackingUrl: shipTrackingUrl.trim() || undefined,
+                trackingNote: shipTrackingNote.trim() || `Dispatched via ${resolvedPartner}`,
+                deliveryBoyId: undefined,
+                deliveryBoyName: undefined,
+                deliveryBoyPhone: undefined,
+                riderLiveLat: undefined,
+                riderLiveLng: undefined,
+              }
+            : o
+        )
+      );
+      setCourierShipModalOrder(null);
+      onRefresh();
+      showModal({ title: 'Shipped via Courier', message: res.message, type: 'success' });
+    } else {
+      showModal({ title: 'Dispatch Error', message: res.message, type: 'error' });
+    }
+  };
+
   const handleSellerApprovalToggle = async (
     seller: SellerProfile,
     nextStatus: 'approved' | 'pending' | 'blocked'
@@ -608,18 +879,23 @@ export const AdminView: React.FC<Props> = ({
             </button>
           </div>
 
-          <nav className="hidden lg:flex items-center gap-5 text-xs font-semibold text-blue-100">
-            {(['dashboard', 'categories', 'products', 'orders', 'sellers', 'users', 'settings'] as AdminTab[]).map((t) => (
+          <nav className="hidden lg:flex items-center gap-4 text-xs font-semibold text-blue-100">
+            {(['dashboard', 'categories', 'products', 'orders', 'delivery_boys', 'sellers', 'users', 'settings'] as AdminTab[]).map((t) => (
               <button
                 key={t}
                 type="button"
                 onClick={() => setAdminTab(t)}
-                className={`capitalize whitespace-nowrap transition inline-flex items-center gap-1 ${adminTab === t ? 'text-[#FFE500] font-bold' : 'hover:text-white'}`}
+                className={`whitespace-nowrap transition inline-flex items-center gap-1 ${adminTab === t ? 'text-[#FFE500] font-bold' : 'hover:text-white'}`}
               >
-                <span>{t}</span>
+                <span className="capitalize">{t === 'delivery_boys' ? 'Delivery Boys' : t}</span>
                 {t === 'sellers' && sellerAttentionCount > 0 && (
                   <span className="px-1.5 py-0.2 rounded-full bg-[#FFE500] text-[#2874F0] text-[10px] font-extrabold tabular-nums">
                     {sellerAttentionCount}
+                  </span>
+                )}
+                {t === 'delivery_boys' && pendingKycRiders.length > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full bg-[#FB641B] text-white text-[10px] font-extrabold tabular-nums">
+                    {pendingKycRiders.length}
                   </span>
                 )}
               </button>
@@ -682,6 +958,7 @@ export const AdminView: React.FC<Props> = ({
             { id: 'categories', label: 'Categories', icon: 'fa-tags' },
             { id: 'products', label: 'Products', icon: 'fa-boxes-stacked' },
             { id: 'orders', label: 'Orders', icon: 'fa-receipt' },
+            { id: 'delivery_boys', label: 'Delivery Boys', icon: 'fa-motorcycle', badge: pendingKycRiders.length },
             { id: 'sellers', label: 'Sellers Management', icon: 'fa-store', badge: sellerAttentionCount },
             { id: 'users', label: 'Users', icon: 'fa-users' },
             { id: 'settings', label: 'Settings', icon: 'fa-gear' },
@@ -782,7 +1059,7 @@ export const AdminView: React.FC<Props> = ({
 
             <div>
               <h2 className="text-sm font-bold text-slate-800 mb-3">Quick Actions</h2>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                 <button type="button" onClick={() => { setAdminTab('products'); openProductModal(); }} className="p-4 rounded-xl bg-[#2874F0] text-white hover:bg-[#1e60d5] transition flex items-center gap-3">
                   <i className="fa-solid fa-plus-circle text-lg text-[#FFE500]"></i>
                   <span className="text-xs font-bold">Add Product</span>
@@ -795,8 +1072,19 @@ export const AdminView: React.FC<Props> = ({
                   <i className="fa-solid fa-truck text-[#FB641B] text-lg"></i>
                   <span className="text-xs font-bold">Manage Orders</span>
                 </button>
+                <button type="button" onClick={() => setAdminTab('delivery_boys')} className="p-4 rounded-xl bg-white border border-slate-200 text-slate-800 hover:border-[#2874F0] transition flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-2.5">
+                    <i className="fa-solid fa-motorcycle text-[#2874F0] text-lg"></i>
+                    <span className="text-xs font-bold">Delivery Boys ({approvedRiders.length})</span>
+                  </span>
+                  {pendingKycRiders.length > 0 && (
+                    <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-extrabold tabular-nums">
+                      {pendingKycRiders.length} KYC
+                    </span>
+                  )}
+                </button>
                 <button type="button" onClick={() => setAdminTab('sellers')} className="p-4 rounded-xl bg-white border border-slate-200 text-slate-800 hover:border-[#2874F0] transition flex items-center justify-between gap-2">
-                  <span className="flex items-center gap-3">
+                  <span className="flex items-center gap-2.5">
                     <i className="fa-solid fa-store text-[#388E3C] text-lg"></i>
                     <span className="text-xs font-bold">Sellers ({liveSellers.length})</span>
                   </span>
@@ -915,7 +1203,7 @@ export const AdminView: React.FC<Props> = ({
                       <th className="py-3 px-4">Customer</th>
                       <th className="py-3 px-4">Amount</th>
                       <th className="py-3 px-4">Live Status</th>
-                      <th className="py-3 px-4">Courier &amp; Tracking</th>
+                      <th className="py-3 px-4">Hybrid Dispatch (Own Rider / Courier)</th>
                       <th className="py-3 px-4 text-right">Actions</th>
                     </tr>
                   </thead>
@@ -931,6 +1219,8 @@ export const AdminView: React.FC<Props> = ({
                         const normalizedValue = normalizeOrderStatus(ord.status);
                         const isReturnReq = normalizedValue === 'Return Requested';
                         const isReturnApproved = normalizedValue === 'Return Approved';
+                        const isActiveDispatchable = !['Delivered', 'Cancelled', 'Refunded'].includes(normalizedValue);
+                        const isCourierDispatched = ord.dispatchMode === 'courier' || (!ord.deliveryBoyId && Boolean(ord.trackingId));
                         return (
                           <tr
                             key={ord.docId || ord.id}
@@ -956,7 +1246,10 @@ export const AdminView: React.FC<Props> = ({
                                 {new Date(ord.created_at).toLocaleDateString('en-IN')}
                               </div>
                             </td>
-                            <td className="py-3.5 px-4 font-semibold text-slate-800">{ord.name}</td>
+                            <td className="py-3.5 px-4">
+                              <p className="font-semibold text-slate-800">{ord.name}</p>
+                              <p className="text-[10px] text-slate-500">{ord.paymentMethod || 'Cash on Delivery'}</p>
+                            </td>
                             <td className="py-3.5 px-4 font-mono font-bold text-slate-900 tabular-nums">{formatINR(ord.total_amount)}</td>
                             <td
                               className="py-2.5 px-4"
@@ -991,24 +1284,74 @@ export const AdminView: React.FC<Props> = ({
                                 </p>
                               )}
                             </td>
-                            <td className="py-3 px-4 text-xs">
-                              {ord.courierName || ord.trackingId || ord.trackingNote ? (
-                                <div className="space-y-0.5 max-w-[220px]">
-                                  <p className="font-bold text-slate-800 truncate">
-                                    {ord.courierName || 'Courier'}
-                                    {ord.trackingId ? (
-                                      <span className="ml-1.5 font-mono text-[11px] text-[#2874F0]">
-                                        {ord.trackingId}
+                            <td
+                              className="py-2.5 px-4 text-xs"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              <div className="space-y-1.5 min-w-[230px]">
+                                {isActiveDispatchable && (
+                                  <div className="flex items-center gap-1.5">
+                                    <select
+                                      aria-label={`Assign rider for order #${ord.id}`}
+                                      value={ord.deliveryBoyId || ''}
+                                      onChange={(e) => handleAssignOrderRider(ord, e.target.value)}
+                                      className="h-8 flex-1 px-2 rounded-lg border border-slate-200 bg-slate-50 text-[11px] font-semibold text-slate-800 focus:border-[#2874F0] focus:outline-none"
+                                    >
+                                      <option value="">— Assign Rider —</option>
+                                      {activeApprovedRiders.map((r) => (
+                                        <option key={r.docId || r.id} value={r.docId || r.id}>
+                                          {r.name} ({r.riderId})
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <button
+                                      type="button"
+                                      onClick={() => openCourierShipModal(ord)}
+                                      className="h-8 px-2.5 rounded-lg bg-[#0F172A] hover:bg-slate-800 text-white text-[11px] font-bold whitespace-nowrap transition inline-flex items-center gap-1"
+                                    >
+                                      <i className="fa-solid fa-box-open text-[10px] text-[#FFE500]"></i>
+                                      <span>Ship via Courier</span>
+                                    </button>
+                                  </div>
+                                )}
+
+                                {ord.deliveryBoyName ? (
+                                  <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                                    <span className="px-2 py-0.5 rounded bg-blue-50 border border-blue-200 text-[#2874F0] font-bold">
+                                      <i className="fa-solid fa-motorcycle mr-1"></i>
+                                      {ord.deliveryBoyName}
+                                    </span>
+                                    {ord.deliveryOtp && (
+                                      <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 font-mono font-extrabold">
+                                        OTP: {ord.deliveryOtp}
                                       </span>
-                                    ) : null}
-                                  </p>
-                                  {ord.trackingNote && (
-                                    <p className="text-[11px] text-slate-500 truncate">{ord.trackingNote}</p>
-                                  )}
-                                </div>
-                              ) : (
-                                <span className="text-[11px] text-slate-400">Not assigned</span>
-                              )}
+                                    )}
+                                    {typeof ord.riderLiveLat === 'number' && typeof ord.riderLiveLng === 'number' && (
+                                      <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold">
+                                        GPS Live
+                                      </span>
+                                    )}
+                                  </div>
+                                ) : isCourierDispatched ? (
+                                  <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                                    <span className="px-2 py-0.5 rounded bg-indigo-50 border border-indigo-200 text-indigo-800 font-bold">
+                                      <i className="fa-solid fa-truck-fast mr-1"></i>
+                                      {ord.courierName || 'Courier'}
+                                    </span>
+                                    {ord.trackingId && (
+                                      <span className="font-mono text-[11px] font-bold text-slate-700">
+                                        AWB: {ord.trackingId}
+                                      </span>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="text-[11px] text-slate-400">
+                                    {activeApprovedRiders.length === 0
+                                      ? 'No active riders yet (use Courier or approve riders)'
+                                      : 'Awaiting Rider or Courier dispatch'}
+                                  </span>
+                                )}
+                              </div>
                             </td>
                             <td
                               className="py-2.5 px-4 text-right"
@@ -1039,7 +1382,7 @@ export const AdminView: React.FC<Props> = ({
                                   className="px-3 py-1.5 rounded-lg bg-[#2874F0] text-white text-xs font-bold hover:bg-[#1e60d5] transition whitespace-nowrap inline-flex items-center gap-1.5"
                                 >
                                   <i className="fa-solid fa-truck-fast text-[11px]"></i>
-                                  <span>Update Tracking</span>
+                                  <span>Tracking</span>
                                 </button>
                               </div>
                             </td>
@@ -1122,6 +1465,58 @@ export const AdminView: React.FC<Props> = ({
                 )}
                 <p className="text-xs text-slate-600"><i className="fa-solid fa-location-dot mr-1.5"></i>{activeOrder.address}</p>
                 <p className="text-xs text-slate-600"><i className="fa-solid fa-wallet mr-1.5"></i>{activeOrder.paymentMethod || 'Cash on Delivery'}</p>
+
+                {/* Hybrid Dispatch Control on Order Detail */}
+                <div className="pt-3 mt-2 border-t border-slate-100 space-y-2">
+                  <p className="text-[11px] font-bold uppercase text-slate-500">Hybrid Dispatch</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      value={activeOrder.deliveryBoyId || ''}
+                      onChange={(e) => handleAssignOrderRider(activeOrder, e.target.value)}
+                      className="h-9 flex-1 min-w-[160px] px-2.5 rounded-lg border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-800"
+                    >
+                      <option value="">— Assign Own Rider —</option>
+                      {activeApprovedRiders.map((r) => (
+                        <option key={r.docId || r.id} value={r.docId || r.id}>
+                          {r.name} ({r.riderId})
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => openCourierShipModal(activeOrder)}
+                      className="h-9 px-3 rounded-lg bg-[#0F172A] hover:bg-slate-800 text-white text-xs font-bold inline-flex items-center gap-1.5"
+                    >
+                      <i className="fa-solid fa-box-open text-[#FFE500]"></i>
+                      <span>Ship via Courier</span>
+                    </button>
+                  </div>
+                  {activeOrder.deliveryBoyName && (
+                    <div className="rounded-lg bg-blue-50 border border-blue-200 p-2.5 text-xs space-y-1">
+                      <p className="font-bold text-[#2874F0]">
+                        <i className="fa-solid fa-motorcycle mr-1.5"></i>
+                        Rider: {activeOrder.deliveryBoyName} ({activeOrder.deliveryBoyPhone})
+                      </p>
+                      {activeOrder.deliveryOtp && (
+                        <p className="font-mono font-extrabold text-amber-900">
+                          4-Digit Delivery OTP: {activeOrder.deliveryOtp}
+                        </p>
+                      )}
+                      {typeof activeOrder.riderLiveLat === 'number' && typeof activeOrder.riderLiveLng === 'number' && (
+                        <a
+                          href={`https://www.google.com/maps?q=${activeOrder.riderLiveLat},${activeOrder.riderLiveLng}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-emerald-700 font-bold hover:underline"
+                        >
+                          <i className="fa-solid fa-location-crosshairs"></i>
+                          <span>View Rider Live GPS Pin</span>
+                        </a>
+                      )}
+                    </div>
+                  )}
+                </div>
+
                 {(activeOrder.courierName || activeOrder.trackingId || activeOrder.trackingNote) && (
                   <div className="pt-2.5 mt-2 border-t border-slate-100 space-y-1 text-xs">
                     <p className="font-bold text-slate-800">
@@ -1238,6 +1633,399 @@ export const AdminView: React.FC<Props> = ({
                 ))}
               </div>
             </div>
+          </div>
+        )}
+
+        {adminTab === 'delivery_boys' && (
+          <div className="space-y-6">
+            {/* Header */}
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h1 className="text-xl font-extrabold text-slate-900">
+                    Delivery Boys &amp; Fleet KYC ({approvedRiders.length})
+                  </h1>
+                  {pendingKycRiders.length > 0 && (
+                    <span className="px-2.5 py-0.5 rounded-md bg-amber-100 border border-amber-300 text-amber-900 text-xs font-extrabold">
+                      {pendingKycRiders.length} Pending KYC Request{pendingKycRiders.length === 1 ? '' : 's'}
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Verify applicant Aadhaar, Driving License &amp; Selfie KYC, manage active riders, and settle COD Cash in Hand.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => openRiderModal()}
+                className="px-4 py-2.5 rounded-lg bg-[#2874F0] text-white text-xs font-bold hover:bg-[#1e60d5] transition inline-flex items-center gap-1.5"
+              >
+                <i className="fa-solid fa-plus"></i>
+                <span>Add Delivery Boy</span>
+              </button>
+            </div>
+
+            {/* Fleet & COD Cash Summary */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="bg-white rounded-xl border border-slate-200/80 p-3.5">
+                <p className="text-[11px] font-semibold text-slate-500">Pending KYC</p>
+                <p className="text-xl font-extrabold text-amber-600 font-mono mt-0.5">{pendingKycRiders.length}</p>
+              </div>
+              <div className="bg-white rounded-xl border border-slate-200/80 p-3.5">
+                <p className="text-[11px] font-semibold text-slate-500">Approved Riders</p>
+                <p className="text-xl font-extrabold text-slate-900 font-mono mt-0.5">{approvedRiders.length}</p>
+              </div>
+              <div className="bg-white rounded-xl border border-slate-200/80 p-3.5">
+                <p className="text-[11px] font-semibold text-slate-500">Active On Duty</p>
+                <p className="text-xl font-extrabold text-[#2E7D32] font-mono mt-0.5">{activeApprovedRiders.length}</p>
+              </div>
+              <div className="bg-gradient-to-br from-emerald-600 to-emerald-700 rounded-xl p-3.5 text-white">
+                <p className="text-[11px] font-semibold text-emerald-100">Fleet COD Cash in Hand</p>
+                <p className="text-xl font-extrabold font-mono mt-0.5">{formatINR(totalCodCashInHand)}</p>
+              </div>
+            </div>
+
+            {/* Section 1: Pending KYC Requests */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-extrabold text-slate-900 uppercase tracking-wide flex items-center gap-2">
+                  <i className="fa-solid fa-id-card text-amber-600"></i>
+                  <span>Pending KYC Requests ({pendingKycRiders.length})</span>
+                </h2>
+              </div>
+
+              {pendingKycRiders.length === 0 ? (
+                <div className="bg-white rounded-xl border border-dashed border-slate-300 p-5 text-center text-xs text-slate-500">
+                  No pending rider KYC applications right now. When riders apply via &ldquo;Join as Delivery Partner&rdquo;, their Aadhaar, Driving License &amp; Selfie appear here for review.
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {pendingKycRiders.map((applicant) => (
+                    <div
+                      key={applicant.docId || applicant.id}
+                      className="bg-white rounded-2xl border-2 border-amber-300 shadow-xs p-4 sm:p-5 space-y-4"
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                        <div className="space-y-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <h3 className="text-base font-extrabold text-slate-900">{applicant.name}</h3>
+                            <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-900 text-[10px] font-extrabold uppercase">
+                              Pending KYC
+                            </span>
+                            <span className="px-2 py-0.5 rounded bg-blue-50 text-[#2874F0] font-mono text-[11px] font-bold">
+                              {applicant.riderId}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600">
+                            <span><i className="fa-solid fa-phone mr-1 text-slate-400"></i>{applicant.phone}</span>
+                            <span><i className="fa-solid fa-location-dot mr-1 text-slate-400"></i>{applicant.areaPincode || applicant.vehicleArea}</span>
+                            <span><i className="fa-solid fa-motorcycle mr-1 text-slate-400"></i>{applicant.vehicleType || 'Vehicle'} {applicant.vehicleNumber ? `(${applicant.vehicleNumber})` : ''}</span>
+                            {applicant.aadhaarNumber && (
+                              <span className="font-mono font-bold text-slate-800">
+                                Aadhaar: {applicant.aadhaarNumber}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-slate-400">
+                            Applied {new Date(applicant.kycSubmittedAt || applicant.created_at).toLocaleString('en-IN')} · Login PIN: <span className="font-mono font-bold text-slate-700">{applicant.password}</span>
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleReviewRiderKyc(applicant, 'approved')}
+                            className="px-4 py-2 rounded-lg bg-[#2E7D32] hover:bg-emerald-800 text-white text-xs font-extrabold transition inline-flex items-center gap-1.5"
+                          >
+                            <i className="fa-solid fa-circle-check"></i>
+                            <span>Approve</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleReviewRiderKyc(applicant, 'rejected')}
+                            className="px-4 py-2 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-extrabold transition inline-flex items-center gap-1.5"
+                          >
+                            <i className="fa-solid fa-circle-xmark"></i>
+                            <span>Reject</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Uploaded KYC Document Thumbnails */}
+                      <div className="grid grid-cols-3 gap-3">
+                        {[
+                          { label: 'Aadhaar Card', src: applicant.aadhaarPhoto },
+                          { label: 'Driving License', src: applicant.drivingLicensePhoto },
+                          { label: 'Live Selfie', src: applicant.selfiePhoto },
+                        ].map((docItem) => (
+                          <div key={docItem.label} className="rounded-xl border border-slate-200 bg-slate-50 p-2">
+                            <p className="text-[10px] font-bold text-slate-600 uppercase mb-1.5 text-center">
+                              {docItem.label}
+                            </p>
+                            {docItem.src ? (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setKycLightbox({
+                                    title: `${applicant.name} — ${docItem.label}`,
+                                    subtitle: `${applicant.riderId} · Phone: ${applicant.phone}${applicant.aadhaarNumber ? ` · Aadhaar: ${applicant.aadhaarNumber}` : ''}`,
+                                    src: docItem.src!,
+                                  })
+                                }
+                                className="group relative w-full h-24 sm:h-28 rounded-lg overflow-hidden border border-slate-200 bg-white block"
+                              >
+                                <img
+                                  src={docItem.src}
+                                  alt={docItem.label}
+                                  className="w-full h-full object-cover group-hover:scale-105 transition"
+                                />
+                                <span className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/70 text-white text-[9px] font-bold">
+                                  Tap to Zoom
+                                </span>
+                              </button>
+                            ) : (
+                              <div className="h-24 sm:h-28 rounded-lg bg-slate-100 flex items-center justify-center text-[10px] text-slate-400">
+                                Not uploaded
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Section 2: Approved Riders & COD Cash Ledger */}
+            <div className="space-y-3">
+              <h2 className="text-sm font-extrabold text-slate-900 uppercase tracking-wide flex items-center gap-2">
+                <i className="fa-solid fa-wallet text-emerald-600"></i>
+                <span>Approved Delivery Partners &amp; COD Cash Ledger ({approvedRiders.length})</span>
+              </h2>
+
+              {approvedRiders.length === 0 ? (
+                <div className="bg-white rounded-xl border border-slate-200/80 p-8 text-center space-y-2">
+                  <i className="fa-solid fa-motorcycle text-3xl text-slate-300"></i>
+                  <p className="text-sm font-bold text-slate-700">No approved delivery partners yet</p>
+                  <p className="text-xs text-slate-500">
+                    Approve a Pending KYC request above or click &ldquo;Add Delivery Boy&rdquo; to onboard a rider immediately.
+                  </p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {approvedRiders.map((rider) => {
+                    const assignedCount = liveOrders.filter(
+                      (o) =>
+                        o.deliveryBoyId === (rider.docId || rider.id) &&
+                        !['Delivered', 'Cancelled', 'Refunded'].includes(o.status)
+                    ).length;
+                    const completedCount = liveOrders.filter(
+                      (o) => o.deliveryBoyId === (rider.docId || rider.id) && o.status === 'Delivered'
+                    ).length;
+                    const cashInHand = Number(rider.codCashInHand || 0);
+
+                    return (
+                      <div
+                        key={rider.docId || rider.id}
+                        className="bg-white rounded-2xl border border-slate-200/90 p-4 space-y-3.5 shadow-2xs"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="w-11 h-11 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center overflow-hidden shrink-0">
+                              {rider.selfiePhoto ? (
+                                <img src={rider.selfiePhoto} alt={rider.name} className="w-full h-full object-cover" />
+                              ) : (
+                                <i className="fa-solid fa-motorcycle text-[#2874F0] text-lg"></i>
+                              )}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <h3 className="text-sm font-extrabold text-slate-900 truncate">{rider.name}</h3>
+                                <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-mono text-[10px] font-bold">
+                                  {rider.riderId}
+                                </span>
+                                <span
+                                  className={`px-2 py-0.5 rounded text-[10px] font-extrabold uppercase ${
+                                    rider.status === 'active'
+                                      ? 'bg-emerald-50 text-[#2E7D32] border border-emerald-200'
+                                      : 'bg-slate-100 text-slate-500 border border-slate-200'
+                                  }`}
+                                >
+                                  {rider.status}
+                                </span>
+                              </div>
+                              <p className="text-xs text-slate-500 truncate mt-0.5">
+                                {rider.phone} · {rider.vehicleArea}
+                              </p>
+                              <p className="text-[11px] text-slate-400">
+                                PIN: <span className="font-mono font-bold text-slate-700">{rider.password}</span> · Active: <strong>{assignedCount}</strong> · Delivered: <strong>{completedCount}</strong>
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Automatic COD Cash in Hand Box + Settle Cash Button */}
+                        <div
+                          className={`rounded-xl p-3 border flex items-center justify-between gap-3 ${
+                            cashInHand > 0
+                              ? 'bg-amber-50 border-amber-300'
+                              : 'bg-slate-50 border-slate-200'
+                          }`}
+                        >
+                          <div>
+                            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">
+                              COD Cash in Hand
+                            </p>
+                            <p
+                              className={`text-lg font-extrabold font-mono tabular-nums ${
+                                cashInHand > 0 ? 'text-amber-900' : 'text-slate-700'
+                              }`}
+                            >
+                              {formatINR(cashInHand)}
+                            </p>
+                            {Number(rider.totalCodSettled || 0) > 0 && (
+                              <p className="text-[10px] text-emerald-700 font-semibold">
+                                Total Settled: {formatINR(Number(rider.totalCodSettled || 0))}
+                              </p>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            disabled={cashInHand <= 0}
+                            onClick={() => handleSettleRiderCash(rider)}
+                            className="px-3.5 py-2 rounded-lg bg-[#2E7D32] hover:bg-emerald-800 disabled:bg-slate-200 disabled:text-slate-400 text-white text-xs font-extrabold transition whitespace-nowrap inline-flex items-center gap-1.5"
+                          >
+                            <i className="fa-solid fa-hand-holding-dollar"></i>
+                            <span>Settle Cash</span>
+                          </button>
+                        </div>
+
+                        {/* KYC Document Quick Links (if uploaded) */}
+                        {(rider.aadhaarPhoto || rider.drivingLicensePhoto || rider.selfiePhoto) && (
+                          <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                            <span className="text-slate-400 font-semibold">KYC Docs:</span>
+                            {rider.aadhaarPhoto && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setKycLightbox({
+                                    title: `${rider.name} — Aadhaar Card`,
+                                    subtitle: `${rider.riderId} · Aadhaar: ${rider.aadhaarNumber || 'Verified'}`,
+                                    src: rider.aadhaarPhoto!,
+                                  })
+                                }
+                                className="px-2 py-0.5 rounded bg-blue-50 text-[#2874F0] font-bold hover:underline"
+                              >
+                                Aadhaar
+                              </button>
+                            )}
+                            {rider.drivingLicensePhoto && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setKycLightbox({
+                                    title: `${rider.name} — Driving License`,
+                                    subtitle: `${rider.riderId} · ${rider.vehicleArea}`,
+                                    src: rider.drivingLicensePhoto!,
+                                  })
+                                }
+                                className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 font-bold hover:underline"
+                              >
+                                License
+                              </button>
+                            )}
+                            {rider.selfiePhoto && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setKycLightbox({
+                                    title: `${rider.name} — Live Selfie`,
+                                    subtitle: `${rider.riderId} · Phone: ${rider.phone}`,
+                                    src: rider.selfiePhoto!,
+                                  })
+                                }
+                                className="px-2 py-0.5 rounded bg-orange-50 text-[#FB641B] font-bold hover:underline"
+                              >
+                                Selfie
+                              </button>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Actions */}
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-slate-100">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleRiderStatus(rider)}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${
+                              rider.status === 'active'
+                                ? 'bg-amber-50 text-amber-800 hover:bg-amber-100'
+                                : 'bg-emerald-50 text-[#2E7D32] hover:bg-emerald-100'
+                            }`}
+                          >
+                            {rider.status === 'active' ? 'Mark Inactive' : 'Mark Active'}
+                          </button>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => openRiderModal(rider)}
+                              className="px-3 py-1.5 rounded-lg bg-blue-50 text-[#2874F0] text-xs font-bold hover:bg-blue-100"
+                            >
+                              <i className="fa-solid fa-pen mr-1"></i>Edit
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteRider(rider)}
+                              className="px-3 py-1.5 rounded-lg bg-rose-50 text-rose-600 text-xs font-bold hover:bg-rose-100"
+                            >
+                              <i className="fa-solid fa-trash mr-1"></i>Delete
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            {rejectedKycRiders.length > 0 && (
+              <div className="space-y-2 pt-2">
+                <h3 className="text-xs font-bold uppercase text-slate-400">
+                  Rejected KYC Applications ({rejectedKycRiders.length})
+                </h3>
+                <div className="space-y-2">
+                  {rejectedKycRiders.map((rej) => (
+                    <div
+                      key={rej.docId || rej.id}
+                      className="bg-white rounded-xl border border-slate-200 p-3 flex flex-wrap items-center justify-between gap-2 text-xs"
+                    >
+                      <div>
+                        <span className="font-bold text-slate-800">{rej.name}</span>
+                        <span className="text-slate-500 ml-2">{rej.phone} · {rej.vehicleArea}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleReviewRiderKyc(rej, 'approved')}
+                          className="px-2.5 py-1 rounded bg-emerald-50 text-[#2E7D32] font-bold hover:bg-emerald-100"
+                        >
+                          Re-Approve
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteRider(rej)}
+                          className="px-2.5 py-1 rounded bg-rose-50 text-rose-600 font-bold hover:bg-rose-100"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -1559,11 +2347,12 @@ export const AdminView: React.FC<Props> = ({
 
       {/* Admin Mobile Bottom Nav */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-white border-t border-slate-200">
-        <div className="grid grid-cols-5 h-14 items-center">
+        <div className="grid grid-cols-6 h-14 items-center">
           {[
             { id: 'dashboard', label: 'Home', icon: 'fa-chart-pie' },
             { id: 'products', label: 'Products', icon: 'fa-boxes-stacked' },
             { id: 'orders', label: 'Orders', icon: 'fa-receipt' },
+            { id: 'delivery_boys', label: 'Riders', icon: 'fa-motorcycle' },
             { id: 'sellers', label: 'Sellers', icon: 'fa-store' },
             { id: 'users', label: 'Users', icon: 'fa-users' },
           ].map((b) => (
@@ -1576,8 +2365,13 @@ export const AdminView: React.FC<Props> = ({
               <i className={`fa-solid ${b.icon} text-base`}></i>
               <span className="text-[10px] font-semibold mt-0.5">{b.label}</span>
               {b.id === 'sellers' && sellerAttentionCount > 0 && (
-                <span className="absolute top-1.5 right-2 min-w-[15px] h-[15px] px-1 rounded-full bg-[#FB641B] text-white text-[9px] font-extrabold flex items-center justify-center tabular-nums">
+                <span className="absolute top-1.5 right-1.5 min-w-[15px] h-[15px] px-1 rounded-full bg-[#FB641B] text-white text-[9px] font-extrabold flex items-center justify-center tabular-nums">
                   {sellerAttentionCount}
+                </span>
+              )}
+              {b.id === 'delivery_boys' && pendingKycRiders.length > 0 && (
+                <span className="absolute top-1.5 right-1.5 min-w-[15px] h-[15px] px-1 rounded-full bg-amber-500 text-white text-[9px] font-extrabold flex items-center justify-center tabular-nums">
+                  {pendingKycRiders.length}
                 </span>
               )}
             </button>
@@ -1847,6 +2641,252 @@ export const AdminView: React.FC<Props> = ({
           </div>
         </div>
       )}
+
+      {/* Add / Edit Delivery Boy Modal */}
+      {riderModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/55 backdrop-blur-xs">
+          <div className="w-full max-w-md bg-white rounded-2xl shadow-2xl p-6 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-base font-extrabold text-slate-900">
+                {editingRider ? 'Edit Delivery Partner' : 'Add New Delivery Boy'}
+              </h2>
+              <button
+                type="button"
+                onClick={() => setRiderModalOpen(false)}
+                className="w-9 h-9 rounded-lg text-slate-500 hover:bg-slate-100"
+              >
+                <i className="fa-solid fa-xmark"></i>
+              </button>
+            </div>
+            <form onSubmit={handleSaveRider} className="space-y-3.5">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Full Name *</label>
+                  <input
+                    type="text"
+                    required
+                    value={riderName}
+                    onChange={(e) => setRiderName(e.target.value)}
+                    placeholder="e.g. Amit Verma"
+                    className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Rider ID *</label>
+                  <input
+                    type="text"
+                    required
+                    value={riderIdInput}
+                    onChange={(e) => setRiderIdInput(e.target.value.toUpperCase())}
+                    placeholder="RDR-1001"
+                    className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-sm font-mono uppercase"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">Phone Number *</label>
+                  <input
+                    type="tel"
+                    required
+                    value={riderPhone}
+                    onChange={(e) => setRiderPhone(e.target.value)}
+                    placeholder="9876543210"
+                    className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">4-Digit PIN / Password *</label>
+                  <input
+                    type="text"
+                    required
+                    value={riderPassword}
+                    onChange={(e) => setRiderPassword(e.target.value)}
+                    placeholder="e.g. 1234"
+                    className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-sm font-mono"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Email (optional)</label>
+                <input
+                  type="email"
+                  value={riderEmail}
+                  onChange={(e) => setRiderEmail(e.target.value)}
+                  placeholder="rider@smartbasket.in"
+                  className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Vehicle &amp; Area *</label>
+                <input
+                  type="text"
+                  required
+                  value={riderVehicleArea}
+                  onChange={(e) => setRiderVehicleArea(e.target.value)}
+                  placeholder="e.g. Bike (DL 08 AB 1234) • Bawana 110039"
+                  className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-sm"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">Status</label>
+                <select
+                  value={riderStatusDraft}
+                  onChange={(e) => setRiderStatusDraft(e.target.value as 'active' | 'inactive')}
+                  className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-sm font-semibold"
+                >
+                  <option value="active">Active (Available for Orders)</option>
+                  <option value="inactive">Inactive</option>
+                </select>
+              </div>
+              <button
+                type="submit"
+                className="w-full h-11 rounded-xl bg-[#2874F0] text-white text-sm font-bold hover:bg-[#1e60d5] transition"
+              >
+                {editingRider ? 'Update Delivery Partner' : 'Save & Activate Delivery Boy'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Hybrid Dispatch: Ship via Third-Party Courier Modal */}
+      {courierShipModalOrder && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/55 backdrop-blur-xs">
+          <div className="w-full max-w-md rounded-t-2xl sm:rounded-2xl bg-white shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="px-5 py-4 bg-[#0F172A] text-white flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-extrabold flex items-center gap-2">
+                  <i className="fa-solid fa-box-open text-[#FFE500]"></i>
+                  <span>Ship via Courier · #{courierShipModalOrder.id}</span>
+                </h2>
+                <p className="text-[11px] text-slate-300 truncate">
+                  {courierShipModalOrder.name} · {formatINR(courierShipModalOrder.total_amount)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCourierShipModalOrder(null)}
+                className="w-8 h-8 rounded-lg text-white/80 hover:bg-white/10 flex items-center justify-center"
+              >
+                <i className="fa-solid fa-xmark"></i>
+              </button>
+            </div>
+            <form onSubmit={handleShipViaCourierSubmit} className="p-5 space-y-3.5">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Courier Partner Name *</label>
+                <select
+                  value={shipCourierPartner}
+                  onChange={(e) => setShipCourierPartner(e.target.value)}
+                  className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-sm font-semibold text-slate-900"
+                >
+                  {['Shiprocket', 'Porter', 'Delhivery', 'Borzo', 'BlueDart', 'India Post', 'Other'].map((p) => (
+                    <option key={p} value={p}>
+                      {p}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {shipCourierPartner === 'Other' && (
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Enter Courier Partner Name *</label>
+                  <input
+                    type="text"
+                    required
+                    value={shipCustomCourier}
+                    onChange={(e) => setShipCustomCourier(e.target.value)}
+                    placeholder="e.g. XpressBees, DTDC, Shadowfax"
+                    className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-sm"
+                  />
+                </div>
+              )}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">AWB Tracking Number *</label>
+                <input
+                  type="text"
+                  required
+                  value={shipAwbNumber}
+                  onChange={(e) => setShipAwbNumber(e.target.value)}
+                  placeholder="e.g. SR129048192IN or DLV948271630"
+                  className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-sm font-mono"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Tracking URL <span className="text-slate-400 font-normal">(optional, auto-generated if blank)</span>
+                </label>
+                <input
+                  type="text"
+                  value={shipTrackingUrl}
+                  onChange={(e) => setShipTrackingUrl(e.target.value)}
+                  placeholder="https://shiprocket.co/tracking/..."
+                  className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Hub / Dispatch Note (optional)</label>
+                <input
+                  type="text"
+                  value={shipTrackingNote}
+                  onChange={(e) => setShipTrackingNote(e.target.value)}
+                  placeholder="e.g. Picked up from Bawana Hub"
+                  className="w-full h-10 px-3 rounded-xl bg-slate-50 border border-slate-200 text-xs"
+                />
+              </div>
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setCourierShipModalOrder(null)}
+                  className="px-4 py-2.5 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2.5 rounded-xl bg-[#FB641B] hover:bg-[#e55a14] text-white text-xs font-extrabold transition"
+                >
+                  Confirm Courier Dispatch
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* KYC Document Zoom Lightbox */}
+      {kycLightbox && (
+        <div
+          onClick={() => setKycLightbox(null)}
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-4"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-lg bg-white rounded-2xl overflow-hidden shadow-2xl"
+          >
+            <div className="px-4 py-3 bg-[#0F172A] text-white flex items-center justify-between">
+              <div className="min-w-0">
+                <h3 className="text-sm font-extrabold truncate">{kycLightbox.title}</h3>
+                <p className="text-[11px] text-slate-300 truncate">{kycLightbox.subtitle}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setKycLightbox(null)}
+                className="w-8 h-8 rounded-lg hover:bg-white/10 text-white flex items-center justify-center shrink-0"
+              >
+                <i className="fa-solid fa-xmark"></i>
+              </button>
+            </div>
+            <div className="p-4 bg-slate-950 flex items-center justify-center">
+              <img
+                src={kycLightbox.src}
+                alt={kycLightbox.title}
+                className="max-h-[70vh] w-auto object-contain rounded-lg"
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+

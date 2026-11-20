@@ -10,7 +10,23 @@ import homeApplianceImg from '../assets/images/product_home_appliance_1794941059
 import beautyImg from '../assets/images/product_beauty_skincare_1794941060127.jpg';
 import groceryImg from '../assets/images/product_grocery_pack_1794941061136.jpg';
 import bigSavingBannerImg from '../assets/images/banner_big_saving_1794941061121.jpg';
-import { CartEntry, Category, Order, Product, SavedAddress, SellerPayoutRecord, SellerProfile, User, normalizeSellerStatus } from '../types';
+import {
+  CartEntry,
+  Category,
+  DeliveryBoy,
+  Order,
+  Product,
+  RiderCashSettlement,
+  RiderKycStatus,
+  SavedAddress,
+  SellerPayoutRecord,
+  SellerProfile,
+  User,
+  extractPincodeFromAddress,
+  generateDeliveryOtp,
+  isOnlinePaidOrder,
+  normalizeSellerStatus,
+} from '../types';
 
 export const ASSETS = {
   smartphone: smartphoneImg,
@@ -62,6 +78,8 @@ const KEYS = {
   adminLoggedIn: 'qk_admin_logged_in_v3',
   sellers: 'qk_sellers_v3',
   currentSeller: 'qk_current_seller_v3',
+  deliveryBoys: 'qk_delivery_boys_v3',
+  currentRider: 'qk_current_rider_v3',
   wishlist: 'qk_wishlist_v3',
   savedAddress: 'qk_saved_address_v3',
 };
@@ -649,8 +667,11 @@ export function placeOrderLocal(payload: {
     name: payload.name.trim(),
     phone: payload.phone.trim(),
     address: payload.address.trim(),
+    pincode: extractPincodeFromAddress(payload.address),
     total_amount: total,
     status: 'Placed',
+    deliveryOtp: generateDeliveryOtp(),
+    deliveryOtpVerified: false,
     created_at: new Date().toISOString(),
     items: orderItems,
     sellerIds,
@@ -1259,3 +1280,714 @@ export function markSellerPayoutPaidLocal(
     paidAmount,
   };
 }
+
+// =============================================================================
+// HYBRID LOGISTICS: DELIVERY PARTNERS, KYC SELF-REGISTRATION, COD LEDGER & GPS
+// =============================================================================
+
+export function getStoredOrdersLocal(): Order[] {
+  return readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+}
+
+function normalizeDeliveryBoyRecord(raw: Partial<DeliveryBoy>): DeliveryBoy {
+  const kycRaw = (raw.kycStatus || 'approved').toString().toLowerCase();
+  const kycStatus: RiderKycStatus =
+    kycRaw === 'pending_kyc' || kycRaw === 'pending'
+      ? 'pending_kyc'
+      : kycRaw === 'rejected'
+      ? 'rejected'
+      : 'approved';
+  const vehicleParts = [raw.vehicleType, raw.vehicleNumber, raw.areaPincode]
+    .map((v) => (v || '').trim())
+    .filter(Boolean);
+  const vehicleArea =
+    (raw.vehicleArea || '').trim() ||
+    (vehicleParts.length > 0 ? vehicleParts.join(' • ') : 'Local Delivery Zone');
+
+  return {
+    id: raw.id || raw.docId || `rider_${Date.now()}`,
+    docId: raw.docId || raw.id,
+    riderId: (raw.riderId || 'RDR-101').trim().toUpperCase(),
+    name: (raw.name || 'Delivery Partner').trim(),
+    phone: (raw.phone || '').trim(),
+    email: (raw.email || '').trim().toLowerCase(),
+    password: String(raw.password || ''),
+    vehicleType: raw.vehicleType?.trim() || undefined,
+    vehicleNumber: raw.vehicleNumber?.trim().toUpperCase() || undefined,
+    areaPincode: raw.areaPincode?.trim() || undefined,
+    vehicleArea,
+    aadhaarNumber: raw.aadhaarNumber?.trim() || undefined,
+    aadhaarPhoto: raw.aadhaarPhoto || undefined,
+    drivingLicensePhoto: raw.drivingLicensePhoto || undefined,
+    selfiePhoto: raw.selfiePhoto || undefined,
+    kycStatus,
+    kycSubmittedAt: raw.kycSubmittedAt,
+    kycReviewedAt: raw.kycReviewedAt,
+    kycRejectionReason: raw.kycRejectionReason,
+    codCashInHand: Math.max(0, Math.round(Number(raw.codCashInHand || 0) * 100) / 100),
+    totalCodSettled: Math.max(0, Math.round(Number(raw.totalCodSettled || 0) * 100) / 100),
+    lastCashSettledAt: raw.lastCashSettledAt,
+    cashSettlementHistory: Array.isArray(raw.cashSettlementHistory) ? raw.cashSettlementHistory : [],
+    status: raw.status === 'inactive' ? 'inactive' : 'active',
+    created_at: raw.created_at || new Date().toISOString(),
+  };
+}
+
+export function getStoredDeliveryBoysLocal(): DeliveryBoy[] {
+  return readJSON<DeliveryBoy[]>(KEYS.deliveryBoys, []).map((r) => normalizeDeliveryBoyRecord(r));
+}
+
+export function cacheDeliveryBoysLocal(riders: DeliveryBoy[]): void {
+  if (!Array.isArray(riders)) return;
+  const existing = getStoredDeliveryBoysLocal();
+  const byKey = new Map<string, DeliveryBoy>();
+  existing.forEach((r) => {
+    const key = r.docId || r.id || r.riderId;
+    byKey.set(key, r);
+  });
+  riders.forEach((r) => {
+    const norm = normalizeDeliveryBoyRecord(r);
+    const key = norm.docId || norm.id || norm.riderId;
+    byKey.set(key, norm);
+  });
+  const merged = Array.from(byKey.values()).sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  );
+  writeJSON(KEYS.deliveryBoys, merged);
+
+  const cur = getStoredCurrentRider();
+  if (cur) {
+    const refreshed = merged.find(
+      (r) =>
+        r.id === cur.id ||
+        (cur.docId && r.docId === cur.docId) ||
+        r.riderId.toLowerCase() === cur.riderId.toLowerCase()
+    );
+    if (refreshed) {
+      setStoredCurrentRider(refreshed);
+    }
+  }
+}
+
+export function getStoredCurrentRider(): DeliveryBoy | null {
+  const raw = readJSON<DeliveryBoy | null>(KEYS.currentRider, null);
+  return raw ? normalizeDeliveryBoyRecord(raw) : null;
+}
+
+export function setStoredCurrentRider(rider: DeliveryBoy | null): void {
+  if (!rider) {
+    localStorage.removeItem(KEYS.currentRider);
+    return;
+  }
+  writeJSON(KEYS.currentRider, normalizeDeliveryBoyRecord(rider));
+}
+
+export function saveDeliveryBoyLocal(payload: {
+  id?: string;
+  docId?: string;
+  riderId?: string;
+  name: string;
+  phone: string;
+  email?: string;
+  password: string;
+  vehicleType?: string;
+  vehicleNumber?: string;
+  areaPincode?: string;
+  vehicleArea: string;
+  aadhaarNumber?: string;
+  aadhaarPhoto?: string;
+  drivingLicensePhoto?: string;
+  selfiePhoto?: string;
+  kycStatus?: RiderKycStatus;
+  status?: 'active' | 'inactive';
+}): { success: boolean; message: string; rider?: DeliveryBoy } {
+  const cleanName = payload.name.trim();
+  const cleanPhone = payload.phone.replace(/\D/g, '').slice(-10) || payload.phone.trim();
+  const cleanEmail = (payload.email || '').trim().toLowerCase();
+  const cleanPassword = payload.password.trim();
+  const cleanVehicle = payload.vehicleArea.trim();
+
+  if (cleanName.length < 2) {
+    return { success: false, message: 'Please enter the Delivery Boy full name.' };
+  }
+  if (cleanPhone.length < 10) {
+    return { success: false, message: 'Please enter a valid 10-digit phone number.' };
+  }
+  if (cleanPassword.length < 4) {
+    return { success: false, message: 'Login PIN / Password must be at least 4 characters.' };
+  }
+  if (!cleanVehicle) {
+    return { success: false, message: 'Please enter Vehicle & Delivery Area (e.g., Bike • Bawana 110039).' };
+  }
+
+  const list = getStoredDeliveryBoysLocal();
+  const nowIso = new Date().toISOString();
+  const existingIdx = payload.id
+    ? list.findIndex((r) => r.id === payload.id || (payload.docId && r.docId === payload.docId))
+    : -1;
+
+  const autoRiderId =
+    (payload.riderId || '').trim().toUpperCase() ||
+    (existingIdx !== -1
+      ? list[existingIdx].riderId
+      : `RDR-${Math.floor(1000 + Math.random() * 9000)}`);
+
+  const duplicate = list.find(
+    (r, idx) =>
+      idx !== existingIdx &&
+      (r.phone === cleanPhone ||
+        r.riderId.toLowerCase() === autoRiderId.toLowerCase() ||
+        (cleanEmail && r.email && r.email.toLowerCase() === cleanEmail))
+  );
+  if (duplicate) {
+    return {
+      success: false,
+      message: 'A Delivery Partner with this Phone, Rider ID, or Email already exists.',
+    };
+  }
+
+  const record: DeliveryBoy =
+    existingIdx !== -1
+      ? normalizeDeliveryBoyRecord({
+          ...list[existingIdx],
+          riderId: autoRiderId,
+          name: cleanName,
+          phone: cleanPhone,
+          email: cleanEmail,
+          password: cleanPassword,
+          vehicleType: payload.vehicleType ?? list[existingIdx].vehicleType,
+          vehicleNumber: payload.vehicleNumber ?? list[existingIdx].vehicleNumber,
+          areaPincode: payload.areaPincode ?? list[existingIdx].areaPincode,
+          vehicleArea: cleanVehicle,
+          aadhaarNumber: payload.aadhaarNumber ?? list[existingIdx].aadhaarNumber,
+          aadhaarPhoto: payload.aadhaarPhoto ?? list[existingIdx].aadhaarPhoto,
+          drivingLicensePhoto: payload.drivingLicensePhoto ?? list[existingIdx].drivingLicensePhoto,
+          selfiePhoto: payload.selfiePhoto ?? list[existingIdx].selfiePhoto,
+          kycStatus: payload.kycStatus ?? list[existingIdx].kycStatus ?? 'approved',
+          status: payload.status ?? list[existingIdx].status,
+        })
+      : normalizeDeliveryBoyRecord({
+          id: payload.id || `rider_${Date.now()}`,
+          docId: payload.docId || payload.id || `rider_${Date.now()}`,
+          riderId: autoRiderId,
+          name: cleanName,
+          phone: cleanPhone,
+          email: cleanEmail,
+          password: cleanPassword,
+          vehicleType: payload.vehicleType,
+          vehicleNumber: payload.vehicleNumber,
+          areaPincode: payload.areaPincode,
+          vehicleArea: cleanVehicle,
+          aadhaarNumber: payload.aadhaarNumber,
+          aadhaarPhoto: payload.aadhaarPhoto,
+          drivingLicensePhoto: payload.drivingLicensePhoto,
+          selfiePhoto: payload.selfiePhoto,
+          kycStatus: payload.kycStatus ?? 'approved',
+          kycReviewedAt: payload.kycStatus === 'pending_kyc' ? undefined : nowIso,
+          codCashInHand: 0,
+          totalCodSettled: 0,
+          cashSettlementHistory: [],
+          status: payload.status ?? 'active',
+          created_at: nowIso,
+        });
+
+  if (existingIdx !== -1) {
+    list[existingIdx] = record;
+  } else {
+    list.unshift(record);
+  }
+  writeJSON(KEYS.deliveryBoys, list);
+  return {
+    success: true,
+    message:
+      existingIdx !== -1
+        ? `${record.name} updated successfully.`
+        : `${record.name} (${record.riderId}) added as Delivery Partner.`,
+    rider: record,
+  };
+}
+
+export function submitRiderKycApplicationLocal(payload: {
+  name: string;
+  phone: string;
+  email?: string;
+  areaPincode: string;
+  vehicleType: string;
+  vehicleNumber: string;
+  aadhaarNumber: string;
+  aadhaarPhoto: string;
+  drivingLicensePhoto: string;
+  selfiePhoto: string;
+  loginPin: string;
+}): { success: boolean; message: string; rider?: DeliveryBoy } {
+  const cleanName = payload.name.trim();
+  const cleanPhone = payload.phone.replace(/\D/g, '').slice(-10);
+  const cleanEmail = (payload.email || '').trim().toLowerCase();
+  const cleanArea = payload.areaPincode.trim();
+  const cleanVehicleType = payload.vehicleType.trim();
+  const cleanVehicleNo = payload.vehicleNumber.trim().toUpperCase();
+  const cleanAadhaar = payload.aadhaarNumber.replace(/\D/g, '');
+  const cleanPin = payload.loginPin.replace(/\D/g, '');
+
+  if (cleanName.length < 2) {
+    return { success: false, message: 'Please enter your Full Name.' };
+  }
+  if (cleanPhone.length !== 10) {
+    return { success: false, message: 'Please enter a valid 10-digit Mobile Number.' };
+  }
+  if (cleanArea.length < 3) {
+    return { success: false, message: 'Please enter your Area & Pincode (e.g., Bawana 110039).' };
+  }
+  if (!cleanVehicleType || cleanVehicleNo.length < 4) {
+    return { success: false, message: 'Please enter your Vehicle Type and Vehicle Number.' };
+  }
+  if (cleanAadhaar.length !== 12) {
+    return { success: false, message: 'Please enter a valid 12-digit Aadhaar Number.' };
+  }
+  if (!payload.aadhaarPhoto) {
+    return { success: false, message: 'Please upload your Aadhaar Card photo.' };
+  }
+  if (!payload.drivingLicensePhoto) {
+    return { success: false, message: 'Please upload your Driving License photo.' };
+  }
+  if (!payload.selfiePhoto) {
+    return { success: false, message: 'Please upload or capture your Live Selfie.' };
+  }
+  if (cleanPin.length !== 4) {
+    return { success: false, message: 'Please create a 4-digit numeric Login PIN.' };
+  }
+
+  const list = getStoredDeliveryBoysLocal();
+  const existing = list.find(
+    (r) => r.phone === cleanPhone || (cleanEmail && r.email && r.email === cleanEmail)
+  );
+  if (existing) {
+    if (existing.kycStatus === 'pending_kyc') {
+      return {
+        success: false,
+        message: 'An application with this mobile number is already Pending KYC review by Admin.',
+      };
+    }
+    if (existing.kycStatus === 'approved') {
+      return {
+        success: false,
+        message: 'This mobile number is already registered as an approved Delivery Partner. Please sign in.',
+      };
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  const docId = existing?.docId || existing?.id || `rider_${Date.now()}`;
+  const riderId = existing?.riderId || `RDR-${Math.floor(1000 + Math.random() * 9000)}`;
+  const vehicleArea = `${cleanVehicleType} (${cleanVehicleNo}) • ${cleanArea}`;
+
+  const application: DeliveryBoy = normalizeDeliveryBoyRecord({
+    id: docId,
+    docId,
+    riderId,
+    name: cleanName,
+    phone: cleanPhone,
+    email: cleanEmail,
+    password: cleanPin,
+    vehicleType: cleanVehicleType,
+    vehicleNumber: cleanVehicleNo,
+    areaPincode: cleanArea,
+    vehicleArea,
+    aadhaarNumber: cleanAadhaar,
+    aadhaarPhoto: payload.aadhaarPhoto,
+    drivingLicensePhoto: payload.drivingLicensePhoto,
+    selfiePhoto: payload.selfiePhoto,
+    kycStatus: 'pending_kyc',
+    kycSubmittedAt: nowIso,
+    kycRejectionReason: undefined,
+    codCashInHand: 0,
+    totalCodSettled: 0,
+    cashSettlementHistory: [],
+    status: 'inactive',
+    created_at: nowIso,
+  });
+
+  const nextList = existing
+    ? list.map((r) => (r.id === existing.id ? application : r))
+    : [application, ...list];
+  writeJSON(KEYS.deliveryBoys, nextList);
+
+  return {
+    success: true,
+    message: `Application submitted! Your Rider ID is ${riderId}. KYC Verification Pending from Admin.`,
+    rider: application,
+  };
+}
+
+export function reviewRiderKycLocal(
+  id: string,
+  decision: 'approved' | 'rejected',
+  reason?: string
+): { success: boolean; message: string; rider?: DeliveryBoy } {
+  const list = getStoredDeliveryBoysLocal();
+  const idx = list.findIndex((r) => r.id === id || r.docId === id);
+  if (idx === -1) return { success: false, message: 'Rider application not found.' };
+  const nowIso = new Date().toISOString();
+  list[idx] = {
+    ...list[idx],
+    kycStatus: decision,
+    kycReviewedAt: nowIso,
+    kycRejectionReason: decision === 'rejected' ? (reason || 'KYC documents did not pass verification.').trim() : undefined,
+    status: decision === 'approved' ? 'active' : 'inactive',
+  };
+  writeJSON(KEYS.deliveryBoys, list);
+  return {
+    success: true,
+    message:
+      decision === 'approved'
+        ? `${list[idx].name} (${list[idx].riderId}) KYC approved and activated!`
+        : `${list[idx].name}'s KYC application was rejected.`,
+    rider: list[idx],
+  };
+}
+
+export function toggleDeliveryBoyStatusLocal(
+  id: string,
+  status: 'active' | 'inactive'
+): { success: boolean; message: string; rider?: DeliveryBoy } {
+  const list = getStoredDeliveryBoysLocal();
+  const idx = list.findIndex((r) => r.id === id || r.docId === id);
+  if (idx === -1) return { success: false, message: 'Delivery partner not found.' };
+  list[idx] = { ...list[idx], status };
+  writeJSON(KEYS.deliveryBoys, list);
+  return {
+    success: true,
+    message: `${list[idx].name} is now ${status === 'active' ? 'Active' : 'Inactive'}.`,
+    rider: list[idx],
+  };
+}
+
+export function deleteDeliveryBoyLocal(id: string): void {
+  const list = getStoredDeliveryBoysLocal().filter((r) => r.id !== id && r.docId !== id);
+  writeJSON(KEYS.deliveryBoys, list);
+}
+
+export function authenticateDeliveryBoyLocal(
+  identifier: string,
+  password: string,
+  ridersOverride?: DeliveryBoy[]
+): { success: boolean; message: string; rider?: DeliveryBoy; pendingKyc?: boolean } {
+  const cleanId = identifier.trim().toLowerCase();
+  const cleanPhone = identifier.replace(/\D/g, '').slice(-10);
+  const cleanPass = password.trim();
+  if (!cleanId || !cleanPass) {
+    return { success: false, message: 'Enter your Phone Number, Rider ID, or Email and 4-digit PIN.' };
+  }
+
+  const list = ridersOverride && ridersOverride.length > 0 ? ridersOverride : getStoredDeliveryBoysLocal();
+  const matched = list.find((r) => {
+    const idMatch =
+      r.riderId.toLowerCase() === cleanId ||
+      (r.email && r.email.toLowerCase() === cleanId) ||
+      (cleanPhone.length >= 10 && r.phone.replace(/\D/g, '').slice(-10) === cleanPhone) ||
+      r.phone.toLowerCase() === cleanId;
+    return idMatch && r.password === cleanPass;
+  });
+
+  if (!matched) {
+    return { success: false, message: 'Invalid Delivery Partner credentials or PIN.' };
+  }
+  if (matched.kycStatus === 'pending_kyc') {
+    return {
+      success: false,
+      pendingKyc: true,
+      message: 'KYC Verification Pending from Admin. You can sign in once your Aadhaar, DL & Selfie are approved.',
+    };
+  }
+  if (matched.kycStatus === 'rejected') {
+    return {
+      success: false,
+      message: `KYC Application Rejected${matched.kycRejectionReason ? `: ${matched.kycRejectionReason}` : '. Please contact Admin or re-apply.'}`,
+    };
+  }
+  if (matched.status !== 'active') {
+    return {
+      success: false,
+      message: 'Your Delivery Partner account is currently Inactive. Please contact Smart Basket Admin.',
+    };
+  }
+
+  setStoredCurrentRider(matched);
+  return { success: true, message: `Welcome back, ${matched.name}!`, rider: matched };
+}
+
+export function recordRiderCodCollectionLocal(
+  riderId: string,
+  amount: number
+): { success: boolean; rider?: DeliveryBoy } {
+  const addAmt = Math.max(0, Math.round(Number(amount || 0) * 100) / 100);
+  if (!riderId || addAmt <= 0) return { success: false };
+  const list = getStoredDeliveryBoysLocal();
+  const idx = list.findIndex((r) => r.id === riderId || r.docId === riderId || r.riderId === riderId);
+  if (idx === -1) return { success: false };
+  const nextCash = Math.round((Number(list[idx].codCashInHand || 0) + addAmt) * 100) / 100;
+  list[idx] = { ...list[idx], codCashInHand: nextCash };
+  writeJSON(KEYS.deliveryBoys, list);
+  const cur = getStoredCurrentRider();
+  if (cur && (cur.id === list[idx].id || cur.riderId === list[idx].riderId)) {
+    setStoredCurrentRider(list[idx]);
+  }
+  return { success: true, rider: list[idx] };
+}
+
+export function settleRiderCodCashLocal(
+  riderId: string,
+  note?: string
+): { success: boolean; message: string; settledAmount?: number; rider?: DeliveryBoy } {
+  const list = getStoredDeliveryBoysLocal();
+  const idx = list.findIndex((r) => r.id === riderId || r.docId === riderId || r.riderId === riderId);
+  if (idx === -1) return { success: false, message: 'Delivery partner not found.' };
+
+  const amount = Math.max(0, Math.round(Number(list[idx].codCashInHand || 0) * 100) / 100);
+  if (amount <= 0) {
+    return { success: false, message: `${list[idx].name} has ₹0 COD cash pending.` };
+  }
+
+  const nowIso = new Date().toISOString();
+  const history = Array.isArray(list[idx].cashSettlementHistory) ? list[idx].cashSettlementHistory! : [];
+  const entry: RiderCashSettlement = {
+    id: `cod_${Date.now()}`,
+    amount,
+    settledAt: nowIso,
+    note: note?.trim() || 'Settled with Admin',
+  };
+
+  list[idx] = {
+    ...list[idx],
+    codCashInHand: 0,
+    totalCodSettled: Math.round((Number(list[idx].totalCodSettled || 0) + amount) * 100) / 100,
+    lastCashSettledAt: nowIso,
+    cashSettlementHistory: [entry, ...history].slice(0, 25),
+  };
+  writeJSON(KEYS.deliveryBoys, list);
+
+  const cur = getStoredCurrentRider();
+  if (cur && (cur.id === list[idx].id || cur.riderId === list[idx].riderId)) {
+    setStoredCurrentRider(list[idx]);
+  }
+
+  return {
+    success: true,
+    settledAmount: amount,
+    rider: list[idx],
+    message: `Settled ₹${amount.toLocaleString('en-IN')} COD cash from ${list[idx].name}.`,
+  };
+}
+
+export function assignOrderRiderLocal(
+  orderId: number,
+  rider: DeliveryBoy | null,
+  deliveryOtp?: string
+): { success: boolean; message: string; order?: Order; otp?: string } {
+  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  const idx = orders.findIndex((o) => o.id === orderId);
+  const otpToUse = deliveryOtp || (idx !== -1 && orders[idx].deliveryOtp) || generateDeliveryOtp();
+  if (idx === -1) {
+    return { success: true, message: rider ? `Assigned to ${rider.name}.` : 'Rider unassigned.', otp: otpToUse };
+  }
+
+  if (!rider) {
+    orders[idx] = {
+      ...orders[idx],
+      dispatchMode: orders[idx].trackingId ? 'courier' : undefined,
+      deliveryBoyId: undefined,
+      deliveryBoyName: undefined,
+      deliveryBoyPhone: undefined,
+      deliveryBoyEmail: undefined,
+      deliveryBoyVehicle: undefined,
+      deliveryAssignedAt: undefined,
+      riderLiveLat: undefined,
+      riderLiveLng: undefined,
+      riderLocationUpdatedAt: undefined,
+    };
+    writeJSON(KEYS.orders, orders);
+    return { success: true, message: `Rider unassigned from Order #${orderId}.`, order: orders[idx], otp: otpToUse };
+  }
+
+  const nowIso = new Date().toISOString();
+  orders[idx] = {
+    ...orders[idx],
+    dispatchMode: 'rider',
+    deliveryBoyId: rider.docId || rider.id,
+    deliveryBoyName: rider.name,
+    deliveryBoyPhone: rider.phone,
+    deliveryBoyEmail: rider.email || undefined,
+    deliveryBoyVehicle: rider.vehicleArea,
+    deliveryAssignedAt: nowIso,
+    deliveryOtp: otpToUse,
+    deliveryOtpVerified: false,
+    pincode: extractPincodeFromAddress(orders[idx].address, orders[idx].pincode),
+    courierName: 'Smart Basket Rider',
+    trackingNote: `Assigned to Delivery Partner ${rider.name}`,
+  };
+  writeJSON(KEYS.orders, orders);
+  return {
+    success: true,
+    message: `Order #${orderId} assigned to ${rider.name}. Delivery OTP: ${otpToUse}`,
+    order: orders[idx],
+    otp: otpToUse,
+  };
+}
+
+export function shipOrderViaCourierLocal(
+  orderId: number,
+  payload: {
+    courierName: string;
+    trackingId: string;
+    trackingUrl?: string;
+    trackingNote?: string;
+  }
+): { success: boolean; message: string; order?: Order } {
+  const cleanCourier = payload.courierName.trim();
+  const cleanAwb = payload.trackingId.trim();
+  if (!cleanCourier || !cleanAwb) {
+    return { success: false, message: 'Courier Partner Name and AWB Tracking Number are required.' };
+  }
+  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  const idx = orders.findIndex((o) => o.id === orderId);
+  if (idx === -1) {
+    return { success: true, message: `Order #${orderId} shipped via ${cleanCourier}.` };
+  }
+  orders[idx] = {
+    ...orders[idx],
+    dispatchMode: 'courier',
+    status: 'Shipped',
+    courierName: cleanCourier,
+    trackingId: cleanAwb,
+    trackingUrl: (payload.trackingUrl || '').trim() || undefined,
+    trackingNote: (payload.trackingNote || '').trim() || `Dispatched via ${cleanCourier}`,
+    deliveryBoyId: undefined,
+    deliveryBoyName: undefined,
+    deliveryBoyPhone: undefined,
+    deliveryBoyEmail: undefined,
+    deliveryBoyVehicle: undefined,
+    riderLiveLat: undefined,
+    riderLiveLng: undefined,
+    riderLocationUpdatedAt: undefined,
+  };
+  writeJSON(KEYS.orders, orders);
+  return {
+    success: true,
+    message: `Order #${orderId} dispatched via ${cleanCourier} (AWB: ${cleanAwb}).`,
+    order: orders[idx],
+  };
+}
+
+export function markOrderOutForDeliveryLocal(
+  orderId: number,
+  coords?: { lat: number; lng: number } | null
+): { success: boolean; message: string; order?: Order } {
+  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  const idx = orders.findIndex((o) => o.id === orderId);
+  if (idx === -1) return { success: true, message: `Order #${orderId} marked Out for Delivery.` };
+  const nowIso = new Date().toISOString();
+  orders[idx] = {
+    ...orders[idx],
+    status: 'Out for Delivery',
+    deliveryOutForDeliveryAt: nowIso,
+    riderLiveLat: coords ? coords.lat : orders[idx].riderLiveLat,
+    riderLiveLng: coords ? coords.lng : orders[idx].riderLiveLng,
+    riderLocationUpdatedAt: coords ? nowIso : orders[idx].riderLocationUpdatedAt,
+    trackingNote: orders[idx].deliveryBoyName
+      ? `Out for Delivery with ${orders[idx].deliveryBoyName}`
+      : 'Out for Delivery',
+  };
+  writeJSON(KEYS.orders, orders);
+  return { success: true, message: `Order #${orderId} is now Out for Delivery.`, order: orders[idx] };
+}
+
+export function updateOrderRiderLocationLocal(
+  orderId: number,
+  lat: number,
+  lng: number
+): { success: boolean; message: string } {
+  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  const idx = orders.findIndex((o) => o.id === orderId);
+  if (idx !== -1) {
+    orders[idx] = {
+      ...orders[idx],
+      riderLiveLat: lat,
+      riderLiveLng: lng,
+      riderLocationUpdatedAt: new Date().toISOString(),
+    };
+    writeJSON(KEYS.orders, orders);
+  }
+  return { success: true, message: 'Live GPS location shared with customer.' };
+}
+
+export function verifyAndDeliverOrderLocal(
+  orderId: number,
+  enteredOtp: string,
+  expectedOtp?: string,
+  riderIdOverride?: string,
+  codAmountOverride?: number
+): { success: boolean; message: string; order?: Order; codCollected?: number } {
+  const cleanEntered = enteredOtp.replace(/\D/g, '').slice(0, 4);
+  if (cleanEntered.length !== 4) {
+    return { success: false, message: 'Please enter the 4-digit Delivery OTP provided by the customer.' };
+  }
+
+  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  const idx = orders.findIndex((o) => o.id === orderId);
+  const targetOtp = (expectedOtp || (idx !== -1 ? orders[idx].deliveryOtp : '') || '').trim();
+  if (targetOtp && cleanEntered !== targetOtp) {
+    return { success: false, message: 'Incorrect Delivery OTP. Please check with the customer and try again.' };
+  }
+
+  const nowIso = new Date().toISOString();
+  let codCollected = 0;
+
+  if (idx !== -1) {
+    const ord = orders[idx];
+    const wasAlreadyDelivered = ord.status === 'Delivered';
+    const isCod = !isOnlinePaidOrder(ord);
+    orders[idx] = {
+      ...ord,
+      status: 'Delivered',
+      deliveryOtpVerified: true,
+      deliveredAt: nowIso,
+      trackingNote: ord.deliveryBoyName
+        ? `Delivered by ${ord.deliveryBoyName} (OTP Verified)`
+        : 'Delivered (OTP Verified)',
+    };
+    writeJSON(KEYS.orders, orders);
+
+    if (!wasAlreadyDelivered && isCod) {
+      const rId = riderIdOverride || ord.deliveryBoyId;
+      const amt = codAmountOverride ?? Number(ord.total_amount ?? ord.total ?? 0);
+      if (rId && amt > 0) {
+        recordRiderCodCollectionLocal(rId, amt);
+        codCollected = amt;
+      }
+    }
+    return {
+      success: true,
+      message:
+        codCollected > 0
+          ? `Order #${orderId} delivered! ₹${codCollected.toLocaleString('en-IN')} added to your COD Cash in Hand.`
+          : `Order #${orderId} verified & marked Delivered!`,
+      order: orders[idx],
+      codCollected,
+    };
+  }
+
+  if (riderIdOverride && codAmountOverride && codAmountOverride > 0) {
+    recordRiderCodCollectionLocal(riderIdOverride, codAmountOverride);
+    codCollected = codAmountOverride;
+  }
+
+  return {
+    success: true,
+    message:
+      codCollected > 0
+        ? `Order #${orderId} delivered! ₹${codCollected.toLocaleString('en-IN')} added to your COD Cash in Hand.`
+        : `Order #${orderId} verified & marked Delivered!`,
+    codCollected,
+  };
+}
+

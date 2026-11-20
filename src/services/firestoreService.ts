@@ -15,30 +15,53 @@ import { db, getFirestoreErrorMessage } from '../firebase';
 import {
   DEFAULT_CATEGORIES,
   DEFAULT_PRODUCTS,
+  assignOrderRiderLocal,
+  authenticateDeliveryBoyLocal,
   cacheCategoriesLocal,
+  cacheDeliveryBoysLocal,
+  cacheOrdersLocal,
   cacheProductsLocal,
   cacheSellersLocal,
   deductProductStockLocal,
+  deleteDeliveryBoyLocal,
   getSellerByEmailOrUidLocal,
+  getStoredDeliveryBoysLocal,
+  getStoredOrdersLocal,
   getStoredSellersLocal,
+  markOrderOutForDeliveryLocal,
   markSellerPayoutPaidLocal,
+  recordRiderCodCollectionLocal,
   requestOrderReturnLocal,
   requestSellerPayoutLocal,
   resolveAssetImage,
+  reviewRiderKycLocal,
+  saveDeliveryBoyLocal,
   saveSellerProfileLocal,
+  settleRiderCodCashLocal,
+  shipOrderViaCourierLocal,
+  submitRiderKycApplicationLocal,
+  toggleDeliveryBoyStatusLocal,
+  updateOrderRiderLocationLocal,
   updateOrderStatusLocal,
   updateOrderTrackingLocal,
   updateSellerStatusLocal,
+  verifyAndDeliverOrderLocal,
 } from '../store/localStore';
 import {
   Category,
+  DeliveryBoy,
   Order,
   OrderItem,
   OrderStatus,
   Product,
+  RiderCashSettlement,
+  RiderKycStatus,
   SellerPayoutRecord,
   SellerProfile,
   User,
+  extractPincodeFromAddress,
+  generateDeliveryOtp,
+  isOnlinePaidOrder,
   normalizeSellerStatus,
 } from '../types';
 
@@ -161,6 +184,33 @@ function mapOrderDoc(id: string, data: Record<string, unknown>): Order {
     items,
     sellerIds,
     sellerEmails,
+    pincode: extractPincodeFromAddress(
+      String(data.address || ''),
+      typeof data.pincode === 'string' ? data.pincode : undefined
+    ),
+    dispatchMode:
+      data.dispatchMode === 'courier'
+        ? 'courier'
+        : data.dispatchMode === 'rider'
+        ? 'rider'
+        : typeof data.deliveryBoyId === 'string' && data.deliveryBoyId.trim()
+        ? 'rider'
+        : typeof data.trackingId === 'string' && data.trackingId.trim()
+        ? 'courier'
+        : undefined,
+    deliveryBoyId: typeof data.deliveryBoyId === 'string' && data.deliveryBoyId.trim() ? data.deliveryBoyId.trim() : undefined,
+    deliveryBoyName: typeof data.deliveryBoyName === 'string' && data.deliveryBoyName.trim() ? data.deliveryBoyName.trim() : undefined,
+    deliveryBoyPhone: typeof data.deliveryBoyPhone === 'string' && data.deliveryBoyPhone.trim() ? data.deliveryBoyPhone.trim() : undefined,
+    deliveryBoyEmail: typeof data.deliveryBoyEmail === 'string' && data.deliveryBoyEmail.trim() ? data.deliveryBoyEmail.trim().toLowerCase() : undefined,
+    deliveryBoyVehicle: typeof data.deliveryBoyVehicle === 'string' && data.deliveryBoyVehicle.trim() ? data.deliveryBoyVehicle.trim() : undefined,
+    deliveryAssignedAt: typeof data.deliveryAssignedAt === 'string' ? data.deliveryAssignedAt : undefined,
+    deliveryOutForDeliveryAt: typeof data.deliveryOutForDeliveryAt === 'string' ? data.deliveryOutForDeliveryAt : undefined,
+    deliveredAt: typeof data.deliveredAt === 'string' ? data.deliveredAt : undefined,
+    deliveryOtp: typeof data.deliveryOtp === 'string' && data.deliveryOtp.trim() ? data.deliveryOtp.trim() : undefined,
+    deliveryOtpVerified: Boolean(data.deliveryOtpVerified),
+    riderLiveLat: typeof data.riderLiveLat === 'number' && Number.isFinite(data.riderLiveLat) ? data.riderLiveLat : undefined,
+    riderLiveLng: typeof data.riderLiveLng === 'number' && Number.isFinite(data.riderLiveLng) ? data.riderLiveLng : undefined,
+    riderLocationUpdatedAt: typeof data.riderLocationUpdatedAt === 'string' ? data.riderLocationUpdatedAt : undefined,
   };
 }
 
@@ -665,6 +715,8 @@ export async function placeOrderFirestore(payload: {
 
     const paymentMethod = payload.paymentMethod || 'Cash on Delivery';
     const orderDocRef = doc(collection(db, 'orders'));
+    const deliveryOtp = generateDeliveryOtp();
+    const pincode = extractPincodeFromAddress(payload.address);
 
     const orderPayload = {
       id: orderNumber,
@@ -675,6 +727,7 @@ export async function placeOrderFirestore(payload: {
       phone: payload.phone.trim(),
       email: payload.email.trim().toLowerCase(),
       address: payload.address.trim(),
+      pincode,
       items: orderItems,
       sellerIds,
       sellerEmails,
@@ -685,6 +738,8 @@ export async function placeOrderFirestore(payload: {
       total_amount: total,
       paymentMethod,
       status: 'Confirmed' as const,
+      deliveryOtp,
+      deliveryOtpVerified: false,
       createdAt: nowIso,
       created_at: nowIso,
     };
@@ -793,6 +848,7 @@ export function subscribeAllOrdersFirestore(
       const list = snapshot.docs
         .map((d) => mapOrderDoc(d.id, d.data() as Record<string, unknown>))
         .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      cacheOrdersLocal(list);
       onData(list);
     },
     (err) => {
@@ -1325,3 +1381,611 @@ export function subscribeSellerOrdersFirestore(
     }
   );
 }
+
+// =============================================================================
+// HYBRID LOGISTICS: DELIVERY BOYS, KYC, COD CASH LEDGER, COURIER & LIVE GPS
+// =============================================================================
+
+function mapDeliveryBoyDoc(id: string, data: Record<string, unknown>): DeliveryBoy {
+  const kycRaw = String(data.kycStatus || 'approved').toLowerCase();
+  const kycStatus: RiderKycStatus =
+    kycRaw === 'pending_kyc' || kycRaw === 'pending'
+      ? 'pending_kyc'
+      : kycRaw === 'rejected'
+      ? 'rejected'
+      : 'approved';
+
+  const rawHistory = Array.isArray(data.cashSettlementHistory) ? data.cashSettlementHistory : [];
+  const cashSettlementHistory: RiderCashSettlement[] = rawHistory
+    .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+    .map((item, idx) => ({
+      id: typeof item.id === 'string' ? item.id : `cod_${idx}`,
+      amount: Math.max(0, Number(item.amount || 0)),
+      settledAt: typeof item.settledAt === 'string' ? item.settledAt : new Date().toISOString(),
+      note: typeof item.note === 'string' ? item.note : undefined,
+    }));
+
+  const vehicleType = typeof data.vehicleType === 'string' ? data.vehicleType : undefined;
+  const vehicleNumber = typeof data.vehicleNumber === 'string' ? data.vehicleNumber : undefined;
+  const areaPincode = typeof data.areaPincode === 'string' ? data.areaPincode : undefined;
+  const fallbackVehicleArea = [vehicleType, vehicleNumber, areaPincode].filter(Boolean).join(' • ');
+
+  return {
+    id: typeof data.id === 'string' && data.id ? data.id : id,
+    docId: id,
+    riderId: String(data.riderId || `RDR-${id.slice(-4).toUpperCase()}`).trim().toUpperCase(),
+    name: String(data.name || 'Delivery Partner').trim(),
+    phone: String(data.phone || '').trim(),
+    email: String(data.email || '').trim().toLowerCase(),
+    password: String(data.password || ''),
+    vehicleType,
+    vehicleNumber,
+    areaPincode,
+    vehicleArea: String(data.vehicleArea || fallbackVehicleArea || 'Local Delivery Zone').trim(),
+    aadhaarNumber: typeof data.aadhaarNumber === 'string' ? data.aadhaarNumber : undefined,
+    aadhaarPhoto: typeof data.aadhaarPhoto === 'string' ? data.aadhaarPhoto : undefined,
+    drivingLicensePhoto: typeof data.drivingLicensePhoto === 'string' ? data.drivingLicensePhoto : undefined,
+    selfiePhoto: typeof data.selfiePhoto === 'string' ? data.selfiePhoto : undefined,
+    kycStatus,
+    kycSubmittedAt: typeof data.kycSubmittedAt === 'string' ? data.kycSubmittedAt : undefined,
+    kycReviewedAt: typeof data.kycReviewedAt === 'string' ? data.kycReviewedAt : undefined,
+    kycRejectionReason: typeof data.kycRejectionReason === 'string' ? data.kycRejectionReason : undefined,
+    codCashInHand: Math.max(0, Math.round(Number(data.codCashInHand || 0) * 100) / 100),
+    totalCodSettled: Math.max(0, Math.round(Number(data.totalCodSettled || 0) * 100) / 100),
+    lastCashSettledAt: typeof data.lastCashSettledAt === 'string' ? data.lastCashSettledAt : undefined,
+    cashSettlementHistory,
+    status: data.status === 'inactive' ? 'inactive' : 'active',
+    created_at: String(data.created_at || data.createdAt || new Date().toISOString()),
+  };
+}
+
+export function subscribeDeliveryBoysFirestore(
+  onData: (riders: DeliveryBoy[]) => void,
+  onError?: (message: string) => void
+): () => void {
+  const localInitial = getStoredDeliveryBoysLocal();
+  if (localInitial.length > 0) {
+    onData(localInitial);
+  }
+
+  return onSnapshot(
+    collection(db, 'deliveryBoys'),
+    (snapshot) => {
+      const remoteList = snapshot.docs.map((d) =>
+        mapDeliveryBoyDoc(d.id, d.data() as Record<string, unknown>)
+      );
+      if (remoteList.length > 0) {
+        cacheDeliveryBoysLocal(remoteList);
+      }
+      const merged = getStoredDeliveryBoysLocal();
+      onData(merged.length > 0 ? merged : remoteList);
+    },
+    (err) => {
+      onData(getStoredDeliveryBoysLocal());
+      onError?.(getFirestoreErrorMessage(err));
+    }
+  );
+}
+
+export async function saveDeliveryBoyFirestore(payload: {
+  id?: string;
+  docId?: string;
+  riderId?: string;
+  name: string;
+  phone: string;
+  email?: string;
+  password: string;
+  vehicleType?: string;
+  vehicleNumber?: string;
+  areaPincode?: string;
+  vehicleArea: string;
+  aadhaarNumber?: string;
+  aadhaarPhoto?: string;
+  drivingLicensePhoto?: string;
+  selfiePhoto?: string;
+  kycStatus?: RiderKycStatus;
+  status?: 'active' | 'inactive';
+}): Promise<{ success: boolean; message: string; rider?: DeliveryBoy }> {
+  const localRes = saveDeliveryBoyLocal(payload);
+  if (!localRes.success || !localRes.rider) {
+    return localRes;
+  }
+
+  const rider = localRes.rider;
+  const docId = rider.docId || rider.id;
+  try {
+    await setDoc(
+      doc(db, 'deliveryBoys', docId),
+      {
+        id: rider.id,
+        riderId: rider.riderId,
+        name: rider.name,
+        phone: rider.phone,
+        email: rider.email,
+        password: rider.password,
+        vehicleType: rider.vehicleType || '',
+        vehicleNumber: rider.vehicleNumber || '',
+        areaPincode: rider.areaPincode || '',
+        vehicleArea: rider.vehicleArea,
+        aadhaarNumber: rider.aadhaarNumber || '',
+        aadhaarPhoto: rider.aadhaarPhoto || '',
+        drivingLicensePhoto: rider.drivingLicensePhoto || '',
+        selfiePhoto: rider.selfiePhoto || '',
+        kycStatus: rider.kycStatus,
+        kycSubmittedAt: rider.kycSubmittedAt || rider.created_at,
+        kycReviewedAt: rider.kycReviewedAt || '',
+        codCashInHand: rider.codCashInHand ?? 0,
+        totalCodSettled: rider.totalCodSettled ?? 0,
+        cashSettlementHistory: rider.cashSettlementHistory ?? [],
+        status: rider.status,
+        created_at: rider.created_at,
+        createdAt: rider.created_at,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+  } catch {
+    // Persisted locally; keep UI seamless
+  }
+
+  return localRes;
+}
+
+export async function submitRiderKycApplicationFirestore(payload: {
+  name: string;
+  phone: string;
+  email?: string;
+  areaPincode: string;
+  vehicleType: string;
+  vehicleNumber: string;
+  aadhaarNumber: string;
+  aadhaarPhoto: string;
+  drivingLicensePhoto: string;
+  selfiePhoto: string;
+  loginPin: string;
+}): Promise<{ success: boolean; message: string; rider?: DeliveryBoy }> {
+  const localRes = submitRiderKycApplicationLocal(payload);
+  if (!localRes.success || !localRes.rider) {
+    return localRes;
+  }
+
+  const rider = localRes.rider;
+  const docId = rider.docId || rider.id;
+  try {
+    await setDoc(
+      doc(db, 'deliveryBoys', docId),
+      {
+        id: rider.id,
+        riderId: rider.riderId,
+        name: rider.name,
+        phone: rider.phone,
+        email: rider.email,
+        password: rider.password,
+        vehicleType: rider.vehicleType || '',
+        vehicleNumber: rider.vehicleNumber || '',
+        areaPincode: rider.areaPincode || '',
+        vehicleArea: rider.vehicleArea,
+        aadhaarNumber: rider.aadhaarNumber || '',
+        aadhaarPhoto: rider.aadhaarPhoto || '',
+        drivingLicensePhoto: rider.drivingLicensePhoto || '',
+        selfiePhoto: rider.selfiePhoto || '',
+        kycStatus: 'pending_kyc',
+        kycSubmittedAt: rider.kycSubmittedAt || rider.created_at,
+        codCashInHand: 0,
+        totalCodSettled: 0,
+        cashSettlementHistory: [],
+        status: 'inactive',
+        created_at: rider.created_at,
+        createdAt: rider.created_at,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+  } catch {
+    // Persisted locally; keep UI seamless
+  }
+
+  return localRes;
+}
+
+export async function reviewRiderKycFirestore(
+  rider: DeliveryBoy,
+  decision: 'approved' | 'rejected',
+  reason?: string
+): Promise<{ success: boolean; message: string; rider?: DeliveryBoy }> {
+  const docId = rider.docId || rider.id;
+  const localRes = reviewRiderKycLocal(docId, decision, reason);
+  try {
+    await setDoc(
+      doc(db, 'deliveryBoys', docId),
+      {
+        kycStatus: decision,
+        kycReviewedAt: new Date().toISOString(),
+        kycRejectionReason: decision === 'rejected' ? (reason || 'KYC documents did not pass verification.').trim() : '',
+        status: decision === 'approved' ? 'active' : 'inactive',
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+  } catch {
+    // Local fallback already applied
+  }
+  return localRes;
+}
+
+export async function toggleDeliveryBoyStatusFirestore(
+  rider: DeliveryBoy,
+  status: 'active' | 'inactive'
+): Promise<{ success: boolean; message: string }> {
+  const docId = rider.docId || rider.id;
+  const localRes = toggleDeliveryBoyStatusLocal(docId, status);
+  try {
+    await setDoc(
+      doc(db, 'deliveryBoys', docId),
+      {
+        status,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+  } catch {
+    // Local fallback already applied
+  }
+  return localRes;
+}
+
+export async function deleteDeliveryBoyFirestore(rider: DeliveryBoy): Promise<{ success: boolean; message: string }> {
+  const docId = rider.docId || rider.id;
+  deleteDeliveryBoyLocal(docId);
+  try {
+    await deleteDoc(doc(db, 'deliveryBoys', docId));
+  } catch {
+    // Local fallback already applied
+  }
+  return { success: true, message: `${rider.name} removed.` };
+}
+
+export async function authenticateDeliveryBoyFirestore(
+  identifier: string,
+  password: string
+): Promise<{ success: boolean; message: string; rider?: DeliveryBoy; pendingKyc?: boolean }> {
+  let remoteList: DeliveryBoy[] = [];
+  try {
+    const snap = await getDocs(collection(db, 'deliveryBoys'));
+    remoteList = snap.docs.map((d) => mapDeliveryBoyDoc(d.id, d.data() as Record<string, unknown>));
+    if (remoteList.length > 0) {
+      cacheDeliveryBoysLocal(remoteList);
+    }
+  } catch {
+    // Fallback to local cache
+  }
+  const merged = getStoredDeliveryBoysLocal();
+  return authenticateDeliveryBoyLocal(identifier, password, merged.length > 0 ? merged : remoteList);
+}
+
+export async function settleRiderCodCashFirestore(
+  rider: DeliveryBoy,
+  note?: string
+): Promise<{ success: boolean; message: string; settledAmount?: number; rider?: DeliveryBoy }> {
+  const docId = rider.docId || rider.id;
+  const localRes = settleRiderCodCashLocal(docId, note);
+  if (!localRes.success || !localRes.rider) {
+    return localRes;
+  }
+  try {
+    await setDoc(
+      doc(db, 'deliveryBoys', docId),
+      {
+        codCashInHand: 0,
+        totalCodSettled: localRes.rider.totalCodSettled ?? 0,
+        lastCashSettledAt: localRes.rider.lastCashSettledAt || new Date().toISOString(),
+        cashSettlementHistory: localRes.rider.cashSettlementHistory ?? [],
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+  } catch {
+    // Local fallback already applied
+  }
+  return localRes;
+}
+
+export async function assignOrderRiderFirestore(
+  order: Order,
+  rider: DeliveryBoy | null
+): Promise<{ success: boolean; message: string; otp?: string }> {
+  const otpToUse = order.deliveryOtp || generateDeliveryOtp();
+  const localRes = assignOrderRiderLocal(order.id, rider, otpToUse);
+  const nowIso = new Date().toISOString();
+
+  if (!order.docId) {
+    return localRes;
+  }
+
+  try {
+    if (!rider) {
+      await updateDoc(doc(db, 'orders', order.docId), {
+        dispatchMode: order.trackingId ? 'courier' : '',
+        deliveryBoyId: '',
+        deliveryBoyName: '',
+        deliveryBoyPhone: '',
+        deliveryBoyEmail: '',
+        deliveryBoyVehicle: '',
+        deliveryAssignedAt: '',
+        riderLiveLat: null,
+        riderLiveLng: null,
+        riderLocationUpdatedAt: '',
+        updatedAt: nowIso,
+      });
+      return { success: true, message: `Rider unassigned from Order #${order.id}.`, otp: otpToUse };
+    }
+
+    await updateDoc(doc(db, 'orders', order.docId), {
+      dispatchMode: 'rider',
+      deliveryBoyId: rider.docId || rider.id,
+      deliveryBoyName: rider.name,
+      deliveryBoyPhone: rider.phone,
+      deliveryBoyEmail: rider.email || '',
+      deliveryBoyVehicle: rider.vehicleArea,
+      deliveryAssignedAt: nowIso,
+      deliveryOtp: otpToUse,
+      deliveryOtpVerified: false,
+      pincode: extractPincodeFromAddress(order.address, order.pincode),
+      courierName: 'Smart Basket Rider',
+      trackingNote: `Assigned to Delivery Partner ${rider.name}`,
+      updatedAt: nowIso,
+    });
+    return {
+      success: true,
+      message: `Order #${order.id} assigned to ${rider.name}. Delivery OTP: ${otpToUse}`,
+      otp: otpToUse,
+    };
+  } catch (err) {
+    return { success: false, message: getFirestoreErrorMessage(err) };
+  }
+}
+
+export async function shipOrderViaCourierFirestore(
+  order: Order,
+  payload: {
+    courierName: string;
+    trackingId: string;
+    trackingUrl?: string;
+    trackingNote?: string;
+  }
+): Promise<{ success: boolean; message: string }> {
+  const cleanCourier = payload.courierName.trim();
+  const cleanAwb = payload.trackingId.trim();
+  if (!cleanCourier || !cleanAwb) {
+    return { success: false, message: 'Courier Partner Name and AWB Tracking Number are required.' };
+  }
+
+  const localRes = shipOrderViaCourierLocal(order.id, payload);
+  if (!order.docId) {
+    return localRes;
+  }
+
+  const nowIso = new Date().toISOString();
+  try {
+    await updateDoc(doc(db, 'orders', order.docId), {
+      dispatchMode: 'courier',
+      status: 'Shipped',
+      courierName: cleanCourier,
+      trackingId: cleanAwb,
+      trackingUrl: (payload.trackingUrl || '').trim(),
+      trackingNote: (payload.trackingNote || '').trim() || `Dispatched via ${cleanCourier}`,
+      deliveryBoyId: '',
+      deliveryBoyName: '',
+      deliveryBoyPhone: '',
+      deliveryBoyEmail: '',
+      deliveryBoyVehicle: '',
+      riderLiveLat: null,
+      riderLiveLng: null,
+      riderLocationUpdatedAt: '',
+      updatedAt: nowIso,
+    });
+    return {
+      success: true,
+      message: `Order #${order.id} dispatched via ${cleanCourier} (AWB: ${cleanAwb}).`,
+    };
+  } catch (err) {
+    return { success: false, message: getFirestoreErrorMessage(err) };
+  }
+}
+
+export function subscribeRiderOrdersFirestore(
+  rider: DeliveryBoy,
+  onData: (orders: Order[]) => void,
+  onError?: (message: string) => void
+): () => void {
+  const riderKeys = new Set(
+    [rider.docId, rider.id, rider.riderId].filter((v): v is string => Boolean(v && v.trim()))
+  );
+  const cleanPhone = rider.phone.replace(/\D/g, '').slice(-10);
+
+  const matchesRider = (ord: Order): boolean => {
+    if (ord.deliveryBoyId && riderKeys.has(ord.deliveryBoyId)) return true;
+    if (
+      cleanPhone.length >= 10 &&
+      ord.deliveryBoyPhone &&
+      ord.deliveryBoyPhone.replace(/\D/g, '').slice(-10) === cleanPhone
+    ) {
+      return true;
+    }
+    return false;
+  };
+
+  const localMatches = getStoredOrdersLocal()
+    .filter(matchesRider)
+    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  if (localMatches.length > 0) {
+    onData(localMatches);
+  }
+
+  return onSnapshot(
+    collection(db, 'orders'),
+    (snapshot) => {
+      const list = snapshot.docs
+        .map((d) => mapOrderDoc(d.id, d.data() as Record<string, unknown>))
+        .filter(matchesRider)
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      onData(list);
+    },
+    (err) => {
+      const fallback = getStoredOrdersLocal()
+        .filter(matchesRider)
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      onData(fallback);
+      onError?.(getFirestoreErrorMessage(err));
+    }
+  );
+}
+
+export async function markOrderOutForDeliveryFirestore(
+  order: Order,
+  coords?: { lat: number; lng: number } | null
+): Promise<{ success: boolean; message: string }> {
+  const localRes = markOrderOutForDeliveryLocal(order.id, coords);
+  if (!order.docId) return localRes;
+
+  const nowIso = new Date().toISOString();
+  const updatePayload: Record<string, unknown> = {
+    status: 'Out for Delivery',
+    deliveryOutForDeliveryAt: nowIso,
+    trackingNote: order.deliveryBoyName
+      ? `Out for Delivery with ${order.deliveryBoyName}`
+      : 'Out for Delivery',
+    updatedAt: nowIso,
+  };
+  if (coords && Number.isFinite(coords.lat) && Number.isFinite(coords.lng)) {
+    updatePayload.riderLiveLat = coords.lat;
+    updatePayload.riderLiveLng = coords.lng;
+    updatePayload.riderLocationUpdatedAt = nowIso;
+  }
+
+  try {
+    await updateDoc(doc(db, 'orders', order.docId), updatePayload);
+    return {
+      success: true,
+      message: coords
+        ? `Order #${order.id} marked Out for Delivery with Live GPS tracking active!`
+        : `Order #${order.id} marked Out for Delivery.`,
+    };
+  } catch (err) {
+    return { success: false, message: getFirestoreErrorMessage(err) };
+  }
+}
+
+export async function updateOrderRiderLocationFirestore(
+  order: Order,
+  lat: number,
+  lng: number
+): Promise<{ success: boolean; message: string }> {
+  updateOrderRiderLocationLocal(order.id, lat, lng);
+  if (!order.docId) {
+    return { success: true, message: 'Live GPS location shared with customer.' };
+  }
+  const nowIso = new Date().toISOString();
+  try {
+    await updateDoc(doc(db, 'orders', order.docId), {
+      riderLiveLat: lat,
+      riderLiveLng: lng,
+      riderLocationUpdatedAt: nowIso,
+      updatedAt: nowIso,
+    });
+    return { success: true, message: 'Live GPS coordinates updated for customer!' };
+  } catch (err) {
+    return { success: false, message: getFirestoreErrorMessage(err) };
+  }
+}
+
+export async function verifyAndDeliverOrderFirestore(
+  order: Order,
+  enteredOtp: string,
+  rider?: DeliveryBoy | null
+): Promise<{ success: boolean; message: string; codCollected?: number }> {
+  const cleanEntered = enteredOtp.replace(/\D/g, '').slice(0, 4);
+  if (cleanEntered.length !== 4) {
+    return { success: false, message: 'Please enter the 4-digit Delivery OTP provided by the customer.' };
+  }
+  const expectedOtp = (order.deliveryOtp || '').trim();
+  if (expectedOtp && cleanEntered !== expectedOtp) {
+    return { success: false, message: 'Incorrect Delivery OTP. Please verify the 4-digit code with the customer.' };
+  }
+
+  const wasAlreadyDelivered = order.status === 'Delivered';
+  const isCod = !isOnlinePaidOrder(order);
+  const codAmount = !wasAlreadyDelivered && isCod ? Math.max(0, Number(order.total_amount ?? order.total ?? 0)) : 0;
+  const riderDocId = rider?.docId || rider?.id || order.deliveryBoyId;
+
+  const localRes = verifyAndDeliverOrderLocal(
+    order.id,
+    cleanEntered,
+    expectedOtp,
+    riderDocId,
+    codAmount
+  );
+  if (!localRes.success) return localRes;
+
+  const nowIso = new Date().toISOString();
+
+  if (order.docId) {
+    try {
+      await updateDoc(doc(db, 'orders', order.docId), {
+        status: 'Delivered',
+        deliveryOtpVerified: true,
+        deliveredAt: nowIso,
+        trackingNote: order.deliveryBoyName
+          ? `Delivered by ${order.deliveryBoyName} (OTP Verified)`
+          : 'Delivered (OTP Verified)',
+        updatedAt: nowIso,
+      });
+    } catch (err) {
+      return { success: false, message: getFirestoreErrorMessage(err) };
+    }
+  }
+
+  // Auto-increment rider's COD Cash in Hand in Firestore when COD order is delivered
+  if (codAmount > 0 && riderDocId) {
+    try {
+      const riderRef = doc(db, 'deliveryBoys', riderDocId);
+      let currentCash = Number(rider?.codCashInHand || 0);
+      try {
+        const snap = await getDoc(riderRef);
+        if (snap.exists()) {
+          const d = snap.data() as Record<string, unknown>;
+          if (typeof d.codCashInHand === 'number' && Number.isFinite(d.codCashInHand)) {
+            currentCash = d.codCashInHand;
+          }
+        }
+      } catch {
+        // use local/known balance
+      }
+      const nextCash = Math.round((currentCash + codAmount) * 100) / 100;
+      await setDoc(
+        riderRef,
+        {
+          codCashInHand: nextCash,
+          updatedAt: nowIso,
+        },
+        { merge: true }
+      );
+      // Ensure local cache stays aligned
+      if (!localRes.codCollected) {
+        recordRiderCodCollectionLocal(riderDocId, codAmount);
+      }
+    } catch {
+      // Local store already updated
+    }
+  }
+
+  return {
+    success: true,
+    codCollected: codAmount,
+    message:
+      codAmount > 0
+        ? `Order #${order.id} delivered! ₹${codAmount.toLocaleString('en-IN')} added to COD Cash in Hand.`
+        : `Order #${order.id} verified & marked Delivered!`,
+  };
+}
+

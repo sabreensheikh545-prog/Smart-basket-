@@ -14,9 +14,11 @@ import {
 } from 'firebase/auth';
 import { AdminView } from './components/AdminView';
 import { CategoriesView } from './components/CategoriesView';
+import { RiderView } from './components/RiderView';
 import { SellerView } from './components/SellerView';
 import { auth, getFirebaseAuthErrorMessage, googleProvider } from './firebase';
 import {
+  authenticateDeliveryBoyFirestore,
   cancelOrderFirestore,
   placeOrderFirestore,
   requestOrderReturnFirestore,
@@ -31,11 +33,13 @@ import {
   ASSETS,
   getBootstrapData,
   getSavedAddressLocal,
+  getStoredCurrentRider,
   getStoredSellersLocal,
   getWishlistIdsLocal,
   saveCart,
   saveStructuredAddressLocal,
   saveWishlistIdsLocal,
+  setStoredCurrentRider,
   setStoredCurrentUser,
   syncFirebaseCustomerLocal,
   updateProfileLocal,
@@ -44,6 +48,7 @@ import {
 import {
   CartEntry,
   Category,
+  DeliveryBoy,
   Order,
   Product,
   RETURN_REASONS,
@@ -54,6 +59,7 @@ import {
   getCourierTrackingUrl,
   getDiscountPercent,
   getEffectiveMrp,
+  getOrderDeliveryStage,
   getOrderStatusLabel,
   getOrderStepIndex,
   normalizeSellerStatus,
@@ -110,7 +116,10 @@ const OFFER_BANNERS = [
 ];
 
 export default function App() {
-  const [mode, setMode] = useState<'user' | 'admin' | 'seller'>('user');
+  const [mode, setMode] = useState<'user' | 'admin' | 'seller' | 'rider'>('user');
+  const [riderInitialView, setRiderInitialView] = useState<'login' | 'register'>('login');
+  const [currentRider, setCurrentRider] = useState<DeliveryBoy | null>(() => getStoredCurrentRider());
+  const [riderToast, setRiderToast] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
   const [page, setPage] = useState<UserPage>('home');
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [adminPinVerified, setAdminPinVerified] = useState(false);
@@ -202,6 +211,7 @@ export default function App() {
   const [orderTab, setOrderTab] = useState<'active' | 'history'>('active');
   const [expandedOrderIds, setExpandedOrderIds] = useState<number[]>([]);
   const [copiedTrackingOrderId, setCopiedTrackingOrderId] = useState<number | null>(null);
+  const [copiedOtpOrderId, setCopiedOtpOrderId] = useState<number | null>(null);
   const [returnModalOrder, setReturnModalOrder] = useState<Order | null>(null);
   const [returnReasonDraft, setReturnReasonDraft] = useState<string>(RETURN_REASONS[0]);
   const [returnResolutionDraft, setReturnResolutionDraft] = useState<'Return' | 'Replace'>('Return');
@@ -242,6 +252,33 @@ export default function App() {
     },
     []
   );
+
+  const showRiderToast = useCallback((text: string, type: 'success' | 'error' | 'info' = 'info') => {
+    setRiderToast({ text, type });
+    window.setTimeout(() => {
+      setRiderToast((prev) => (prev?.text === text ? null : prev));
+    }, 3500);
+  }, []);
+
+  const openRiderPortal = useCallback((view: 'login' | 'register') => {
+    setRiderInitialView(view);
+    if (view === 'register') {
+      setCurrentRider(null);
+      setStoredCurrentRider(null);
+    }
+    setSidebarOpen(false);
+    setMode('rider');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }, []);
+
+  const handleCopyDeliveryOtp = useCallback((orderId: number, otp: string) => {
+    if (!otp) return;
+    navigator.clipboard?.writeText(otp).catch(() => {});
+    setCopiedOtpOrderId(orderId);
+    window.setTimeout(() => {
+      setCopiedOtpOrderId((prev) => (prev === orderId ? null : prev));
+    }, 2000);
+  }, []);
 
   const refreshLocalSession = useCallback(() => {
     const data = getBootstrapData();
@@ -1062,6 +1099,20 @@ export default function App() {
     showLoader('Signing in...');
 
     try {
+      // Auto-detect Delivery Partner credentials first (by email / phone / Rider ID + PIN)
+      const riderCheck = await authenticateDeliveryBoyFirestore(email, authPassword);
+      if (riderCheck.success && riderCheck.rider) {
+        setCurrentRider(riderCheck.rider);
+        setAuthPassword('');
+        setMode('rider');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        return;
+      }
+      if (riderCheck.pendingKyc) {
+        setAuthError(riderCheck.message);
+        return;
+      }
+
       const cred = await signInWithEmailAndPassword(auth, email, authPassword);
       const fsRes = await syncUserProfileFirestore({
         uid: cred.user.uid,
@@ -1746,8 +1797,127 @@ export default function App() {
           </div>
         )}
 
-        {/* Real-World Courier & Live Tracking Info Box */}
-        {hasCourierInfo && !isCancelled && (
+        {/* Own Delivery Partner Live Info + Live GPS Map + 4-Digit Delivery OTP */}
+        {!isCancelled && (ord.deliveryBoyName || ord.deliveryOtp) && ord.dispatchMode !== 'courier' && (
+          <div className="px-4 py-3.5 border-t border-slate-100 bg-gradient-to-r from-blue-50/70 to-indigo-50/50 space-y-3">
+            {ord.deliveryBoyName && (() => {
+              const deliveryStage = getOrderDeliveryStage(ord);
+              const riderPhoneClean = (ord.deliveryBoyPhone || '').replace(/[^\d+]/g, '');
+              const hasLiveGps =
+                typeof ord.riderLiveLat === 'number' && typeof ord.riderLiveLng === 'number';
+              const riderLiveMapUrl = hasLiveGps
+                ? `https://www.google.com/maps?q=${ord.riderLiveLat},${ord.riderLiveLng}`
+                : '';
+
+              return (
+                <div className="space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-9 h-9 rounded-full bg-[#2874F0] text-white flex items-center justify-center shrink-0 shadow-xs">
+                        <i className="fa-solid fa-motorcycle text-sm"></i>
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="text-[10px] font-extrabold uppercase tracking-wide text-slate-500">
+                            Delivery Partner
+                          </span>
+                          {deliveryStage && (
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase ${
+                                deliveryStage === 'Delivered'
+                                  ? 'bg-emerald-100 text-[#2E7D32]'
+                                  : deliveryStage === 'Out for Delivery'
+                                  ? 'bg-orange-100 text-orange-800'
+                                  : 'bg-blue-100 text-[#2874F0]'
+                              }`}
+                            >
+                              {deliveryStage}
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-sm font-extrabold text-slate-900 truncate">
+                          {ord.deliveryBoyName}
+                        </p>
+                        {ord.deliveryBoyPhone && (
+                          <p className="text-xs text-slate-600 font-mono">{ord.deliveryBoyPhone}</p>
+                        )}
+                      </div>
+                    </div>
+
+                    {riderPhoneClean && (
+                      <a
+                        href={`tel:${riderPhoneClean}`}
+                        className="px-3 py-1.5 rounded-lg bg-[#2E7D32] hover:bg-emerald-800 text-white text-xs font-extrabold inline-flex items-center gap-1.5 shadow-2xs transition shrink-0"
+                      >
+                        <i className="fa-solid fa-phone text-[11px]"></i>
+                        <span>Call Rider</span>
+                      </a>
+                    )}
+                  </div>
+
+                  {/* Live GPS Rider Map Tracking Button when Out for Delivery */}
+                  {ord.status === 'Out for Delivery' && hasLiveGps && (
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-white border border-emerald-200 px-3 py-2.5 shadow-2xs">
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse shrink-0"></span>
+                        <div>
+                          <p className="font-extrabold text-emerald-900">Rider Live GPS Active</p>
+                          {ord.riderLocationUpdatedAt && (
+                            <p className="text-[10px] text-slate-500">
+                              Updated{' '}
+                              {new Date(ord.riderLocationUpdatedAt).toLocaleTimeString('en-IN', {
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                      <a
+                        href={riderLiveMapUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-3.5 py-2 rounded-lg bg-[#2874F0] hover:bg-[#1e60d5] text-white text-xs font-extrabold inline-flex items-center gap-1.5 shadow-xs transition shrink-0"
+                      >
+                        <i className="fa-solid fa-location-crosshairs"></i>
+                        <span>Track Rider Live on Map</span>
+                      </a>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
+            {/* 4-Digit Delivery Verification OTP Box */}
+            {ord.deliveryOtp && ord.status !== 'Delivered' && !isReturnState && (
+              <div className="rounded-xl bg-amber-50 border border-amber-300 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-[10px] font-extrabold uppercase tracking-wider text-amber-800">
+                    Delivery Verification OTP
+                  </p>
+                  <p className="text-[11px] text-amber-900">
+                    Share this 4-digit OTP with your delivery partner upon receiving your parcel.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="px-3 py-1 rounded-lg bg-white border border-amber-300 font-mono text-base font-extrabold tracking-[0.25em] text-amber-950 select-text">
+                    {ord.deliveryOtp}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleCopyDeliveryOtp(ord.id, ord.deliveryOtp || '')}
+                    className="px-2.5 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-[11px] font-bold transition"
+                  >
+                    {copiedOtpOrderId === ord.id ? 'Copied ✓' : 'Copy'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Third-Party Courier & Live Shipment Tracking Box */}
+        {hasCourierInfo && !isCancelled && (!ord.deliveryBoyName || ord.dispatchMode === 'courier') && (
           <div className="px-4 py-3 border-t border-slate-100 bg-blue-50/40 space-y-2.5">
             {ord.trackingNote && (
               <div className="flex items-start gap-2 text-xs">
@@ -1797,9 +1967,10 @@ export default function App() {
                   href={liveTrackUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="px-3 py-1.5 rounded-lg bg-[#2874F0] text-white text-xs font-extrabold hover:bg-[#1e60d5] transition inline-flex items-center gap-1.5 shrink-0"
+                  className="px-3.5 py-1.5 rounded-lg bg-[#2874F0] text-white text-xs font-extrabold hover:bg-[#1e60d5] transition inline-flex items-center gap-1.5 shrink-0"
                 >
-                  <span>Track Live Package ↗</span>
+                  <i className="fa-solid fa-arrow-up-right-from-square text-[10px]"></i>
+                  <span>Track Live Shipment</span>
                 </a>
               )}
             </div>
@@ -1938,6 +2109,33 @@ export default function App() {
           hideLoader={hideLoader}
           showModal={showModal}
         />
+      ) : mode === 'rider' ? (
+        <>
+          <RiderView
+            rider={currentRider}
+            initialView={riderInitialView}
+            onRiderAuthenticated={(r) => setCurrentRider(r)}
+            onRiderLogout={() => {
+              setCurrentRider(null);
+              setStoredCurrentRider(null);
+            }}
+            onExit={() => setMode('user')}
+            showToast={showRiderToast}
+          />
+          {riderToast && (
+            <div
+              className={`fixed bottom-5 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-xl shadow-xl text-xs font-bold text-white max-w-[90vw] text-center ${
+                riderToast.type === 'error'
+                  ? 'bg-rose-600'
+                  : riderToast.type === 'success'
+                  ? 'bg-emerald-600'
+                  : 'bg-[#0F172A]'
+              }`}
+            >
+              {riderToast.text}
+            </div>
+          )}
+        </>
       ) : (
         <div className={page === 'categories' ? 'pb-14 md:pb-0' : page === 'cart' ? 'pb-36 md:pb-28' : page === 'detail' ? 'pb-20 md:pb-10' : 'pb-16 md:pb-10'}>
           {/* Flipkart Royal Blue Header (#2874F0) — hidden on Split-Screen All Categories & Flipkart-style Cart which render their own clean white sticky headers */}
@@ -2191,6 +2389,24 @@ export default function App() {
                 >
                   <i className="fa-solid fa-store w-5 text-center text-[#FB641B]"></i>
                   <span>{currentUser?.isSeller ? 'Seller Hub' : 'Become a Seller'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => openRiderPortal('login')}
+                  className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-slate-700 hover:bg-slate-100"
+                >
+                  <i className="fa-solid fa-motorcycle w-5 text-center text-[#2874F0]"></i>
+                  <span>{currentRider ? `Rider Hub (${currentRider.riderId})` : 'Delivery Partner Login'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => openRiderPortal('register')}
+                  className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-sm font-semibold text-slate-700 hover:bg-emerald-50"
+                >
+                  <i className="fa-solid fa-user-plus w-5 text-center text-[#2E7D32]"></i>
+                  <span>Join as Delivery Partner</span>
                 </button>
 
                 {isStrictAdminEmail && (
@@ -3666,6 +3882,43 @@ export default function App() {
                 </button>
               </div>
 
+              {/* Delivery Partner Portal Card (Login + Join KYC) */}
+              <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5 space-y-3">
+                <div className="flex items-center gap-3.5 min-w-0">
+                  <div className="w-11 h-11 rounded-xl bg-blue-50 text-[#2874F0] flex items-center justify-center shrink-0">
+                    <i className="fa-solid fa-motorcycle text-lg"></i>
+                  </div>
+                  <div className="min-w-0">
+                    <h2 className="text-sm font-extrabold text-slate-900 truncate">
+                      {currentRider
+                        ? `Delivery Partner · ${currentRider.name} (${currentRider.riderId})`
+                        : 'Smart Basket Delivery Partner Fleet'}
+                    </h2>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Sign in for live assigned deliveries &amp; GPS dispatch, or apply with KYC to join our fleet
+                    </p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => openRiderPortal('login')}
+                    className="px-4 py-2.5 rounded-lg bg-[#2874F0] text-white text-xs font-bold hover:bg-[#1e60d5] transition flex items-center justify-center gap-2"
+                  >
+                    <i className="fa-solid fa-motorcycle"></i>
+                    <span>{currentRider ? 'Open Rider Dashboard' : 'Delivery Partner Login'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openRiderPortal('register')}
+                    className="px-4 py-2.5 rounded-lg bg-[#0F172A] text-white text-xs font-bold hover:bg-slate-800 transition flex items-center justify-center gap-2"
+                  >
+                    <i className="fa-solid fa-id-card text-[#FFE500]"></i>
+                    <span>Join as Delivery Partner</span>
+                  </button>
+                </div>
+              </div>
+
               {/* Legal, Policies & Customer Support (Razorpay & Play Store Compliance) */}
               <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
                 <div className="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between">
@@ -4002,6 +4255,31 @@ export default function App() {
                     </svg>
                     <span>Continue with Google</span>
                   </button>
+
+                  {/* Delivery Partner Login & Join as Delivery Partner (KYC Self-Registration) */}
+                  <div className="mt-5 pt-4 border-t border-slate-200 space-y-2.5">
+                    <p className="text-[11px] font-extrabold uppercase tracking-wider text-slate-500 text-center">
+                      Delivery Partner Portal
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => openRiderPortal('login')}
+                        className="h-11 px-3 rounded-lg bg-blue-50 border border-blue-200 hover:bg-blue-100 text-[#2874F0] text-xs font-extrabold transition flex items-center justify-center gap-2"
+                      >
+                        <i className="fa-solid fa-motorcycle"></i>
+                        <span>Delivery Partner Login</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openRiderPortal('register')}
+                        className="h-11 px-3 rounded-lg bg-[#0F172A] hover:bg-slate-800 text-white text-xs font-extrabold transition flex items-center justify-center gap-2"
+                      >
+                        <i className="fa-solid fa-user-plus text-[#FFE500]"></i>
+                        <span>Join as Delivery Partner</span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
 

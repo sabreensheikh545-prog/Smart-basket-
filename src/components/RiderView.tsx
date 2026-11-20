@@ -1,699 +1,1172 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  authenticateDeliveryBoyFirestore,
-  markOrderOutForDeliveryFirestore,
-  subscribeRiderOrdersFirestore,
-  verifyAndDeliverOrderFirestore,
-} from '../services/firestoreService';
-import { setStoredCurrentRider } from '../store/localStore';
+  AlertCircle,
+  ArrowLeft,
+  BadgeCheck,
+  Bike,
+  Camera,
+  CheckCircle2,
+  Clock,
+  CreditCard,
+  FileCheck2,
+  IdCard,
+  IndianRupee,
+  KeyRound,
+  LocateFixed,
+  LogOut,
+  MapPin,
+  Navigation,
+  Package,
+  Phone,
+  RefreshCw,
+  ShieldCheck,
+  Truck,
+  Upload,
+  UserPlus,
+  Wallet,
+  X,
+} from 'lucide-react';
 import {
   DeliveryBoy,
   Order,
   extractPincodeFromAddress,
   formatINR,
-  getOrderDeliveryStage,
   isOnlinePaidOrder,
 } from '../types';
+import {
+  authenticateDeliveryBoyFirestore,
+  markOrderOutForDeliveryFirestore,
+  submitRiderKycApplicationFirestore,
+  subscribeDeliveryBoysFirestore,
+  subscribeRiderOrdersFirestore,
+  updateOrderRiderLocationFirestore,
+  verifyAndDeliverOrderFirestore,
+} from '../services/firestoreService';
+import { setStoredCurrentRider } from '../store/localStore';
 
-interface Props {
-  currentRider: DeliveryBoy | null;
-  onRiderChange: (rider: DeliveryBoy | null) => void;
-  onExitRider: () => void;
-  onRefresh: () => void;
-  showLoader: (text?: string) => void;
-  hideLoader: () => void;
-  showModal: (opts: {
-    title: string;
-    message: string;
-    type?: 'info' | 'success' | 'error';
-    onConfirm?: () => void;
-    confirmText?: string;
-  }) => void;
+interface RiderViewProps {
+  rider: DeliveryBoy | null;
+  initialView?: 'login' | 'register';
+  onRiderAuthenticated: (rider: DeliveryBoy) => void;
+  onRiderLogout: () => void;
+  onExit: () => void;
+  showToast: (text: string, type?: 'success' | 'error' | 'info') => void;
 }
 
-export const RiderView: React.FC<Props> = ({
-  currentRider,
-  onRiderChange,
-  onExitRider,
-  onRefresh,
-  showLoader,
-  hideLoader,
-  showModal,
+const VEHICLE_TYPES = ['Bike', 'Scooter', 'Electric Scooter', 'Auto / Tempo', 'Cycle'] as const;
+
+function compressImageFile(file: File, maxDim = 480, quality = 0.62): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read selected image file.'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Invalid image file.'));
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          if (width >= height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(String(reader.result || ''));
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.src = String(reader.result || '');
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function captureCurrentGpsCoords(): Promise<{ lat: number; lng: number } | null> {
+  return new Promise((resolve) => {
+    if (typeof navigator === 'undefined' || !navigator.geolocation) {
+      resolve(null);
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        resolve({
+          lat: Number(pos.coords.latitude.toFixed(6)),
+          lng: Number(pos.coords.longitude.toFixed(6)),
+        });
+      },
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 15000 }
+    );
+  });
+}
+
+export const RiderView: React.FC<RiderViewProps> = ({
+  rider,
+  initialView = 'login',
+  onRiderAuthenticated,
+  onRiderLogout,
+  onExit,
+  showToast,
 }) => {
-  // Login state
+  // Unauthenticated view switcher ('login' | 'register')
+  const [authTab, setAuthTab] = useState<'login' | 'register'>(initialView);
+
+  // Login form state
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [loginError, setLoginError] = useState('');
-  const [loginBusy, setLoginBusy] = useState(false);
+  const [loggingIn, setLoggingIn] = useState(false);
+  const [loginFeedback, setLoginFeedback] = useState<{ text: string; pendingKyc?: boolean } | null>(null);
 
-  // Dashboard state
-  const [riderOrders, setRiderOrders] = useState<Order[]>([]);
+  // KYC Self-Registration form state
+  const [regName, setRegName] = useState('');
+  const [regPhone, setRegPhone] = useState('');
+  const [regEmail, setRegEmail] = useState('');
+  const [regAreaPincode, setRegAreaPincode] = useState('');
+  const [regVehicleType, setRegVehicleType] = useState<string>('Bike');
+  const [regVehicleNumber, setRegVehicleNumber] = useState('');
+  const [regAadhaarNumber, setRegAadhaarNumber] = useState('');
+  const [regAadhaarPhoto, setRegAadhaarPhoto] = useState('');
+  const [regDlPhoto, setRegDlPhoto] = useState('');
+  const [regSelfiePhoto, setRegSelfiePhoto] = useState('');
+  const [regPin, setRegPin] = useState('');
+  const [submittingKyc, setSubmittingKyc] = useState(false);
+  const [submittedApplication, setSubmittedApplication] = useState<DeliveryBoy | null>(null);
+
+  const aadhaarInputRef = useRef<HTMLInputElement | null>(null);
+  const dlInputRef = useRef<HTMLInputElement | null>(null);
+  const selfieInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Authenticated Rider dashboard state
+  const [liveRiderProfile, setLiveRiderProfile] = useState<DeliveryBoy | null>(rider);
+  const [orders, setOrders] = useState<Order[]>([]);
   const [activeTab, setActiveTab] = useState<'active' | 'completed'>('active');
-
-  // OTP Verification Modal state
+  const [busyOrderId, setBusyOrderId] = useState<number | null>(null);
+  const [gpsBusyOrderId, setGpsBusyOrderId] = useState<number | null>(null);
   const [otpModalOrder, setOtpModalOrder] = useState<Order | null>(null);
   const [otpInput, setOtpInput] = useState('');
   const [otpError, setOtpError] = useState('');
-  const [otpBusy, setOtpBusy] = useState(false);
+  const [verifyingOtp, setVerifyingOtp] = useState(false);
 
   useEffect(() => {
-    if (!currentRider) {
-      setRiderOrders([]);
+    setAuthTab(initialView);
+  }, [initialView]);
+
+  useEffect(() => {
+    setLiveRiderProfile(rider);
+  }, [rider]);
+
+  // Subscribe to rider's live profile (for COD Cash in Hand updates & settlements)
+  useEffect(() => {
+    if (!rider) return;
+    const unsub = subscribeDeliveryBoysFirestore((allRiders) => {
+      const matched = allRiders.find(
+        (r) =>
+          r.id === rider.id ||
+          (rider.docId && r.docId === rider.docId) ||
+          r.riderId.toLowerCase() === rider.riderId.toLowerCase()
+      );
+      if (matched) {
+        setLiveRiderProfile(matched);
+      }
+    });
+    return () => unsub();
+  }, [rider]);
+
+  // Subscribe to orders assigned to this rider
+  useEffect(() => {
+    if (!rider) {
+      setOrders([]);
       return;
     }
     const unsub = subscribeRiderOrdersFirestore(
-      currentRider,
-      (list) => setRiderOrders(list),
-      () => {
-        // Offline local cache fallback is handled automatically inside subscribeRiderOrdersFirestore
-      }
+      rider,
+      (list) => setOrders(list),
+      () => {}
     );
     return () => unsub();
-  }, [currentRider]);
+  }, [rider]);
 
   const activeDeliveries = useMemo(
     () =>
-      riderOrders.filter(
+      orders.filter(
         (o) =>
           o.status !== 'Delivered' &&
           o.status !== 'Cancelled' &&
-          o.status !== 'Return Requested' &&
-          o.status !== 'Return Approved' &&
           o.status !== 'Refunded'
       ),
-    [riderOrders]
+    [orders]
   );
 
   const completedDeliveries = useMemo(
     () =>
-      riderOrders.filter(
+      orders.filter(
         (o) =>
           o.status === 'Delivered' ||
           o.status === 'Return Requested' ||
           o.status === 'Return Approved' ||
           o.status === 'Refunded'
       ),
-    [riderOrders]
+    [orders]
   );
 
-  const codToCollectTotal = useMemo(
+  const codPendingToCollect = useMemo(
     () =>
       activeDeliveries
         .filter((o) => !isOnlinePaidOrder(o))
-        .reduce((sum, o) => sum + Number(o.total_amount || 0), 0),
+        .reduce((sum, o) => sum + Number(o.total_amount ?? o.total ?? 0), 0),
     [activeDeliveries]
   );
 
-  const handleRiderLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (loginBusy) return;
-    setLoginError('');
-    setLoginBusy(true);
-    showLoader('Signing in to Delivery Partner Hub...');
+  const effectiveRider = liveRiderProfile || rider;
+
+  const handlePhotoUpload = async (
+    e: React.ChangeEvent<HTMLInputElement>,
+    setter: React.Dispatch<React.SetStateAction<string>>,
+    label: string
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
     try {
-      const res = await authenticateDeliveryBoyFirestore(identifier, password);
-      if (!res.success || !res.rider) {
-        setLoginError(res.message);
-        return;
-      }
-      onRiderChange(res.rider);
-      setIdentifier('');
-      setPassword('');
-    } finally {
-      hideLoader();
-      setLoginBusy(false);
+      const compressed = await compressImageFile(file, 480, 0.62);
+      setter(compressed);
+      showToast(`${label} uploaded`, 'success');
+    } catch {
+      showToast(`Could not process ${label}. Try another image.`, 'error');
     }
   };
 
-  const handleRiderLogout = () => {
-    setStoredCurrentRider(null);
-    onRiderChange(null);
-    setRiderOrders([]);
-    setOtpModalOrder(null);
+  const handleRiderLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginFeedback(null);
+    setLoggingIn(true);
+    const res = await authenticateDeliveryBoyFirestore(identifier, password);
+    setLoggingIn(false);
+    if (!res.success || !res.rider) {
+      setLoginFeedback({ text: res.message, pendingKyc: res.pendingKyc });
+      showToast(res.message, res.pendingKyc ? 'info' : 'error');
+      return;
+    }
+    setStoredCurrentRider(res.rider);
+    onRiderAuthenticated(res.rider);
+    showToast(res.message, 'success');
+  };
+
+  const handleKycSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmittingKyc(true);
+    const res = await submitRiderKycApplicationFirestore({
+      name: regName,
+      phone: regPhone,
+      email: regEmail,
+      areaPincode: regAreaPincode,
+      vehicleType: regVehicleType,
+      vehicleNumber: regVehicleNumber,
+      aadhaarNumber: regAadhaarNumber,
+      aadhaarPhoto: regAadhaarPhoto,
+      drivingLicensePhoto: regDlPhoto,
+      selfiePhoto: regSelfiePhoto,
+      loginPin: regPin,
+    });
+    setSubmittingKyc(false);
+    if (!res.success || !res.rider) {
+      showToast(res.message, 'error');
+      return;
+    }
+    setSubmittedApplication(res.rider);
+    showToast(res.message, 'success');
   };
 
   const handleMarkOutForDelivery = async (order: Order) => {
-    showLoader('Updating delivery status...');
-    const res = await markOrderOutForDeliveryFirestore(order);
-    hideLoader();
-    if (res.success) {
-      setRiderOrders((prev) =>
-        prev.map((o) =>
-          o.id === order.id
-            ? { ...o, status: 'Out for Delivery', deliveryOutForDeliveryAt: new Date().toISOString() }
-            : o
-        )
-      );
-      onRefresh();
-      showModal({
-        title: 'Out for Delivery',
-        message: res.message,
-        type: 'success',
-      });
+    setBusyOrderId(order.id);
+    showToast('Capturing live GPS location...', 'info');
+    const coords = await captureCurrentGpsCoords();
+    const res = await markOrderOutForDeliveryFirestore(order, coords);
+    setBusyOrderId(null);
+    if (!res.success) {
+      showToast(res.message, 'error');
+      return;
+    }
+    if (!coords) {
+      showToast(`Order #${order.id} Out for Delivery (Enable GPS to share live map pin)`, 'info');
     } else {
-      showModal({ title: 'Error', message: res.message, type: 'error' });
+      showToast(res.message, 'success');
     }
   };
 
-  const openOtpVerificationModal = (order: Order) => {
+  const handleRefreshLiveGps = async (order: Order) => {
+    setGpsBusyOrderId(order.id);
+    const coords = await captureCurrentGpsCoords();
+    if (!coords) {
+      setGpsBusyOrderId(null);
+      showToast('Location permission denied or unavailable. Please enable GPS.', 'error');
+      return;
+    }
+    const res = await updateOrderRiderLocationFirestore(order, coords.lat, coords.lng);
+    setGpsBusyOrderId(null);
+    showToast(res.message, res.success ? 'success' : 'error');
+  };
+
+  const openOtpModal = (order: Order) => {
     setOtpModalOrder(order);
     setOtpInput('');
     setOtpError('');
   };
 
-  const handleVerifyAndDeliver = async (e: React.FormEvent) => {
+  const handleVerifyDeliveryOtp = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!otpModalOrder || otpBusy) return;
+    if (!otpModalOrder) return;
     setOtpError('');
-    setOtpBusy(true);
-    showLoader('Verifying Delivery OTP...');
-    try {
-      const res = await verifyAndDeliverOrderFirestore(otpModalOrder, otpInput);
-      if (!res.success) {
-        setOtpError(res.message);
-        return;
-      }
-      const deliveredId = otpModalOrder.id;
-      setRiderOrders((prev) =>
-        prev.map((o) =>
-          o.id === deliveredId
-            ? {
-                ...o,
-                status: 'Delivered',
-                deliveryOtpVerified: true,
-                deliveredAt: new Date().toISOString(),
-              }
-            : o
-        )
-      );
-      setOtpModalOrder(null);
-      setOtpInput('');
-      onRefresh();
-      showModal({
-        title: 'Delivery Verified',
-        message: res.message,
-        type: 'success',
-      });
-    } finally {
-      hideLoader();
-      setOtpBusy(false);
+    setVerifyingOtp(true);
+    const res = await verifyAndDeliverOrderFirestore(otpModalOrder, otpInput, effectiveRider);
+    setVerifyingOtp(false);
+    if (!res.success) {
+      setOtpError(res.message);
+      return;
     }
+    showToast(res.message, 'success');
+    setOtpModalOrder(null);
+    setOtpInput('');
   };
 
-  // ============================================================================
-  // RIDER LOGIN SCREEN
-  // ============================================================================
-  if (!currentRider) {
+  // ===========================================================================
+  // UNAUTHENTICATED SCREEN: RIDER LOGIN + JOIN AS DELIVERY PARTNER (KYC)
+  // ===========================================================================
+  if (!effectiveRider) {
     return (
       <div className="min-h-screen bg-[#F1F3F6] flex flex-col">
-        <header className="sticky top-0 z-40 bg-[#2874F0] text-white shadow-sm">
-          <div className="max-w-4xl mx-auto px-4 h-14 flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="text-lg font-extrabold italic tracking-tight">
-                Smart <span className="text-[#FFE500]">Basket</span>
-              </span>
-              <span className="px-2 py-0.5 rounded bg-white/15 text-[10px] font-extrabold uppercase tracking-wider">
-                Delivery Partner
-              </span>
-            </div>
+        {/* Top Bar */}
+        <header className="bg-[#0F172A] text-white sticky top-0 z-30 shadow-md">
+          <div className="max-w-3xl mx-auto px-4 h-14 flex items-center justify-between">
             <button
-              type="button"
-              onClick={onExitRider}
-              className="px-3 py-1.5 rounded-lg bg-white text-[#2874F0] text-xs font-bold hover:bg-blue-50 transition whitespace-nowrap"
+              onClick={onExit}
+              className="flex items-center gap-2 text-sm font-semibold text-white/90 hover:text-white"
             >
-              <i className="fa-solid fa-arrow-left mr-1.5"></i>Storefront
+              <ArrowLeft className="w-4 h-4" />
+              Back to Smart Basket
             </button>
+            <div className="flex items-center gap-2">
+              <Bike className="w-5 h-5 text-[#FFE500]" />
+              <span className="font-bold text-sm tracking-tight">Delivery Partner Portal</span>
+            </div>
           </div>
         </header>
 
-        <main className="flex-1 flex items-center justify-center p-4">
-          <div className="w-full max-w-md bg-white rounded-2xl border border-slate-200 shadow-lg overflow-hidden">
-            <div className="bg-[#2874F0] px-6 py-6 text-white">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <h1 className="text-xl font-extrabold tracking-tight">Delivery Partner Login</h1>
-                  <p className="mt-1 text-xs text-blue-100 leading-relaxed">
-                    Sign in with the Rider ID or Email &amp; Password created by Smart Basket Admin
-                  </p>
+        <main className="flex-1 px-4 py-6 max-w-xl w-full mx-auto">
+          {/* Tab Switcher */}
+          <div className="bg-white rounded-2xl p-1.5 shadow-sm border border-gray-200 grid grid-cols-2 gap-1.5 mb-5">
+            <button
+              type="button"
+              onClick={() => {
+                setAuthTab('login');
+                setSubmittedApplication(null);
+              }}
+              className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition ${
+                authTab === 'login'
+                  ? 'bg-[#2874F0] text-white shadow-sm'
+                  : 'text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              <Bike className="w-4 h-4" />
+              Delivery Partner Login
+            </button>
+            <button
+              type="button"
+              onClick={() => setAuthTab('register')}
+              className={`py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition ${
+                authTab === 'register'
+                  ? 'bg-[#0F172A] text-white shadow-sm'
+                  : 'text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              <UserPlus className="w-4 h-4" />
+              Join as Delivery Partner
+            </button>
+          </div>
+
+          {authTab === 'login' ? (
+            <div className="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+              <div className="bg-gradient-to-r from-[#2874F0] to-[#1a5bc9] px-6 py-6 text-white">
+                <div className="w-12 h-12 rounded-xl bg-white/15 backdrop-blur flex items-center justify-center mb-3">
+                  <Truck className="w-6 h-6 text-[#FFE500]" />
                 </div>
-                <div className="w-12 h-12 rounded-xl bg-[#FFE500] text-[#2874F0] flex items-center justify-center shrink-0 shadow-xs">
-                  <i className="fa-solid fa-motorcycle text-xl"></i>
-                </div>
+                <h1 className="text-xl font-extrabold tracking-tight">Delivery Partner Login</h1>
+                <p className="text-xs text-blue-100 mt-1">
+                  Sign in with your Mobile Number, Rider ID, or Email and 4-digit Login PIN.
+                </p>
               </div>
-            </div>
 
-            <div className="p-6">
-              {loginError && (
-                <div className="mb-4 p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold flex items-start gap-2">
-                  <i className="fa-solid fa-circle-exclamation mt-0.5 shrink-0"></i>
-                  <span>{loginError}</span>
-                </div>
-              )}
+              <form onSubmit={handleRiderLogin} className="p-6 space-y-4">
+                {loginFeedback && (
+                  <div
+                    className={`rounded-xl p-3.5 border flex items-start gap-2.5 text-xs font-semibold ${
+                      loginFeedback.pendingKyc
+                        ? 'bg-amber-50 border-amber-300 text-amber-900'
+                        : 'bg-red-50 border-red-200 text-red-700'
+                    }`}
+                  >
+                    {loginFeedback.pendingKyc ? (
+                      <Clock className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                    )}
+                    <div>
+                      {loginFeedback.pendingKyc && (
+                        <p className="font-extrabold text-amber-950 mb-0.5">
+                          KYC Verification Pending from Admin
+                        </p>
+                      )}
+                      <p>{loginFeedback.text}</p>
+                    </div>
+                  </div>
+                )}
 
-              <form onSubmit={handleRiderLogin} className="space-y-4">
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                    Rider ID, Email, or Phone Number
+                  <label className="block text-xs font-bold text-gray-700 uppercase tracking-wide mb-1.5">
+                    Phone Number / Rider ID / Email
                   </label>
                   <input
                     type="text"
+                    required
                     value={identifier}
                     onChange={(e) => setIdentifier(e.target.value)}
-                    required
-                    placeholder="e.g. SB-RIDER-101 or rider@smartbasket.in"
-                    className="w-full h-11 px-3.5 rounded-xl bg-slate-50 border border-slate-300 text-sm font-medium text-slate-900 placeholder-slate-400 focus:bg-white focus:border-[#2874F0] focus:outline-none"
+                    placeholder="e.g., 9876543210 or RDR-1024"
+                    className="w-full px-3.5 py-2.5 rounded-lg border border-gray-300 text-sm focus:ring-2 focus:ring-[#2874F0] focus:border-[#2874F0] outline-none"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                    Password
+                  <label className="block text-xs font-bold text-gray-700 uppercase tracking-wide mb-1.5">
+                    4-Digit Login PIN / Password
                   </label>
-                  <div className="relative">
+                  <input
+                    type="password"
+                    required
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Enter your 4-digit PIN or password"
+                    className="w-full px-3.5 py-2.5 rounded-lg border border-gray-300 text-sm focus:ring-2 focus:ring-[#2874F0] focus:border-[#2874F0] outline-none"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={loggingIn}
+                  className="w-full py-3 rounded-lg bg-[#FB641B] hover:bg-[#e55a14] text-white font-bold text-sm shadow-sm transition disabled:opacity-60 flex items-center justify-center gap-2"
+                >
+                  <ShieldCheck className="w-4 h-4" />
+                  {loggingIn ? 'Verifying Rider Account...' : 'Sign In to Rider Dashboard'}
+                </button>
+
+                <div className="pt-3 border-t border-gray-100 text-center">
+                  <p className="text-xs text-gray-500 mb-2">New to Smart Basket Fleet?</p>
+                  <button
+                    type="button"
+                    onClick={() => setAuthTab('register')}
+                    className="text-xs font-bold text-[#2874F0] hover:underline inline-flex items-center gap-1"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    Register & Upload KYC Documents Now
+                  </button>
+                </div>
+              </form>
+            </div>
+          ) : submittedApplication ? (
+            <div className="bg-white rounded-2xl shadow-lg border border-emerald-200 p-6 text-center">
+              <div className="w-16 h-16 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center mx-auto mb-4">
+                <Clock className="w-8 h-8" />
+              </div>
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-100 text-amber-900 text-xs font-extrabold uppercase tracking-wide">
+                Status: Pending KYC
+              </span>
+              <h2 className="text-xl font-extrabold text-gray-900 mt-3">
+                Application Submitted Successfully!
+              </h2>
+              <p className="text-sm text-gray-600 mt-2">
+                Thank you, <span className="font-bold text-gray-900">{submittedApplication.name}</span>. Your
+                Aadhaar, Driving License, and Selfie have been sent to Smart Basket Admin for KYC verification.
+              </p>
+
+              <div className="mt-5 bg-gray-50 border border-gray-200 rounded-xl p-4 text-left space-y-2 text-xs">
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Your Rider ID</span>
+                  <span className="font-mono font-extrabold text-[#2874F0]">{submittedApplication.riderId}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Registered Phone</span>
+                  <span className="font-bold text-gray-900">{submittedApplication.phone}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-gray-500">Area & Vehicle</span>
+                  <span className="font-semibold text-gray-800">{submittedApplication.vehicleArea}</span>
+                </div>
+              </div>
+
+              <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3 mt-4">
+                Once Admin approves your KYC, sign in using your Phone Number ({submittedApplication.phone}) or Rider ID ({submittedApplication.riderId}) and your 4-digit PIN.
+              </p>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setIdentifier(submittedApplication.phone);
+                  setSubmittedApplication(null);
+                  setAuthTab('login');
+                }}
+                className="mt-5 w-full py-3 rounded-lg bg-[#2874F0] hover:bg-[#1e60d5] text-white font-bold text-sm transition"
+              >
+                Go to Delivery Partner Login
+              </button>
+            </div>
+          ) : (
+            <div className="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+              <div className="bg-gradient-to-r from-[#0F172A] to-[#1E293B] px-6 py-5 text-white">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-10 h-10 rounded-xl bg-[#FFE500]/15 border border-[#FFE500]/30 flex items-center justify-center">
+                    <UserPlus className="w-5 h-5 text-[#FFE500]" />
+                  </div>
+                  <div>
+                    <h1 className="text-lg font-extrabold tracking-tight">Join as Delivery Partner</h1>
+                    <p className="text-xs text-slate-300">
+                      Complete KYC registration to start delivering orders in your area
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <form onSubmit={handleKycSubmit} className="p-5 sm:p-6 space-y-4">
+                {/* Personal & Area Details */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                  <div>
+                    <label className="block text-xs font-bold text-gray-700 mb-1">
+                      Full Name *
+                    </label>
                     <input
-                      type={showPassword ? 'text' : 'password'}
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
+                      type="text"
                       required
-                      placeholder="Enter your rider password"
-                      className="w-full h-11 pl-3.5 pr-11 rounded-xl bg-slate-50 border border-slate-300 text-sm font-medium text-slate-900 placeholder-slate-400 focus:bg-white focus:border-[#2874F0] focus:outline-none"
+                      value={regName}
+                      onChange={(e) => setRegName(e.target.value)}
+                      placeholder="e.g., Rahul Sharma"
+                      className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm focus:ring-2 focus:ring-[#2874F0] outline-none"
                     />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword((v) => !v)}
-                      aria-label={showPassword ? 'Hide password' : 'Show password'}
-                      className="absolute right-0 top-0 h-11 w-11 flex items-center justify-center text-slate-400 hover:text-slate-700"
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-gray-700 mb-1">
+                      10-Digit Mobile Number *
+                    </label>
+                    <input
+                      type="tel"
+                      required
+                      maxLength={10}
+                      value={regPhone}
+                      onChange={(e) => setRegPhone(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                      placeholder="9876543210"
+                      className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm focus:ring-2 focus:ring-[#2874F0] outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                  <div>
+                    <label className="block text-xs font-bold text-gray-700 mb-1">
+                      Area / Pincode *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={regAreaPincode}
+                      onChange={(e) => setRegAreaPincode(e.target.value)}
+                      placeholder="e.g., Bawana 110039"
+                      className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm focus:ring-2 focus:ring-[#2874F0] outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-gray-700 mb-1">
+                      Email (Optional)
+                    </label>
+                    <input
+                      type="email"
+                      value={regEmail}
+                      onChange={(e) => setRegEmail(e.target.value)}
+                      placeholder="rider@email.com"
+                      className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm focus:ring-2 focus:ring-[#2874F0] outline-none"
+                    />
+                  </div>
+                </div>
+
+                {/* Vehicle Details */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                  <div>
+                    <label className="block text-xs font-bold text-gray-700 mb-1">
+                      Vehicle Type *
+                    </label>
+                    <select
+                      value={regVehicleType}
+                      onChange={(e) => setRegVehicleType(e.target.value)}
+                      className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm bg-white focus:ring-2 focus:ring-[#2874F0] outline-none"
                     >
-                      <i className={`fa-solid ${showPassword ? 'fa-eye-slash' : 'fa-eye'} text-sm`}></i>
-                    </button>
+                      {VEHICLE_TYPES.map((vt) => (
+                        <option key={vt} value={vt}>
+                          {vt}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-gray-700 mb-1">
+                      Vehicle Number *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={regVehicleNumber}
+                      onChange={(e) => setRegVehicleNumber(e.target.value.toUpperCase())}
+                      placeholder="e.g., DL 08 AB 1234"
+                      className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm uppercase focus:ring-2 focus:ring-[#2874F0] outline-none"
+                    />
+                  </div>
+                </div>
+
+                {/* Aadhaar Number & 4-Digit Login PIN */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                  <div>
+                    <label className="block text-xs font-bold text-gray-700 mb-1">
+                      12-Digit Aadhaar Number *
+                    </label>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      required
+                      maxLength={12}
+                      value={regAadhaarNumber}
+                      onChange={(e) => setRegAadhaarNumber(e.target.value.replace(/\D/g, '').slice(0, 12))}
+                      placeholder="123456789012"
+                      className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm font-mono tracking-wider focus:ring-2 focus:ring-[#2874F0] outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-gray-700 mb-1">
+                      Create 4-Digit Login PIN *
+                    </label>
+                    <input
+                      type="password"
+                      inputMode="numeric"
+                      required
+                      maxLength={4}
+                      value={regPin}
+                      onChange={(e) => setRegPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
+                      placeholder="••••"
+                      className="w-full px-3 py-2.5 rounded-lg border border-gray-300 text-sm font-mono tracking-[0.35em] focus:ring-2 focus:ring-[#2874F0] outline-none"
+                    />
+                  </div>
+                </div>
+
+                {/* KYC Document Uploads */}
+                <div className="pt-2 border-t border-gray-100">
+                  <div className="flex items-center gap-2 mb-3">
+                    <FileCheck2 className="w-4 h-4 text-[#2874F0]" />
+                    <h3 className="text-xs font-extrabold uppercase tracking-wide text-gray-800">
+                      KYC Document Uploads (Required)
+                    </h3>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    {/* Aadhaar Card Photo */}
+                    <div className="border-2 border-dashed border-gray-200 rounded-xl p-3 text-center bg-gray-50/70">
+                      <input
+                        ref={aadhaarInputRef}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => handlePhotoUpload(e, setRegAadhaarPhoto, 'Aadhaar Card Photo')}
+                      />
+                      {regAadhaarPhoto ? (
+                        <div className="relative">
+                          <img
+                            src={regAadhaarPhoto}
+                            alt="Aadhaar preview"
+                            className="w-full h-24 object-cover rounded-lg border border-gray-200"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => aadhaarInputRef.current?.click()}
+                            className="mt-2 w-full py-1 rounded bg-white border border-gray-200 text-[11px] font-bold text-[#2874F0]"
+                          >
+                            Change Aadhaar
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => aadhaarInputRef.current?.click()}
+                          className="w-full py-4 flex flex-col items-center justify-center gap-1.5 text-gray-600 hover:text-[#2874F0]"
+                        >
+                          <IdCard className="w-6 h-6 text-[#2874F0]" />
+                          <span className="text-xs font-bold">Aadhaar Photo</span>
+                          <span className="text-[10px] text-gray-400 flex items-center gap-1">
+                            <Upload className="w-3 h-3" /> Tap to upload
+                          </span>
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Driving License Photo */}
+                    <div className="border-2 border-dashed border-gray-200 rounded-xl p-3 text-center bg-gray-50/70">
+                      <input
+                        ref={dlInputRef}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => handlePhotoUpload(e, setRegDlPhoto, 'Driving License Photo')}
+                      />
+                      {regDlPhoto ? (
+                        <div className="relative">
+                          <img
+                            src={regDlPhoto}
+                            alt="Driving License preview"
+                            className="w-full h-24 object-cover rounded-lg border border-gray-200"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => dlInputRef.current?.click()}
+                            className="mt-2 w-full py-1 rounded bg-white border border-gray-200 text-[11px] font-bold text-[#2874F0]"
+                          >
+                            Change License
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => dlInputRef.current?.click()}
+                          className="w-full py-4 flex flex-col items-center justify-center gap-1.5 text-gray-600 hover:text-[#2874F0]"
+                        >
+                          <FileCheck2 className="w-6 h-6 text-emerald-600" />
+                          <span className="text-xs font-bold">Driving License</span>
+                          <span className="text-[10px] text-gray-400 flex items-center gap-1">
+                            <Upload className="w-3 h-3" /> Tap to upload
+                          </span>
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Live Selfie */}
+                    <div className="border-2 border-dashed border-gray-200 rounded-xl p-3 text-center bg-gray-50/70">
+                      <input
+                        ref={selfieInputRef}
+                        type="file"
+                        accept="image/*"
+                        capture="user"
+                        className="hidden"
+                        onChange={(e) => handlePhotoUpload(e, setRegSelfiePhoto, 'Live Selfie')}
+                      />
+                      {regSelfiePhoto ? (
+                        <div className="relative">
+                          <img
+                            src={regSelfiePhoto}
+                            alt="Live Selfie preview"
+                            className="w-full h-24 object-cover rounded-lg border border-gray-200"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => selfieInputRef.current?.click()}
+                            className="mt-2 w-full py-1 rounded bg-white border border-gray-200 text-[11px] font-bold text-[#2874F0]"
+                          >
+                            Retake Selfie
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => selfieInputRef.current?.click()}
+                          className="w-full py-4 flex flex-col items-center justify-center gap-1.5 text-gray-600 hover:text-[#2874F0]"
+                        >
+                          <Camera className="w-6 h-6 text-[#FB641B]" />
+                          <span className="text-xs font-bold">Live Selfie</span>
+                          <span className="text-[10px] text-gray-400 flex items-center gap-1">
+                            <Camera className="w-3 h-3" /> Capture / Upload
+                          </span>
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
 
                 <button
                   type="submit"
-                  disabled={loginBusy}
-                  className="w-full h-12 rounded-xl bg-[#FB641B] text-white text-sm font-extrabold hover:bg-[#e55812] disabled:opacity-60 transition flex items-center justify-center gap-2"
+                  disabled={submittingKyc}
+                  className="w-full py-3.5 rounded-xl bg-[#FB641B] hover:bg-[#e55a14] text-white font-extrabold text-sm shadow-md transition disabled:opacity-60 flex items-center justify-center gap-2"
                 >
-                  <i className="fa-solid fa-motorcycle"></i>
-                  <span>{loginBusy ? 'Signing In...' : 'Sign In as Delivery Partner'}</span>
+                  <ShieldCheck className="w-4 h-4" />
+                  {submittingKyc ? 'Submitting KYC Application...' : 'Submit KYC & Join Fleet'}
                 </button>
               </form>
-
-              <div className="mt-5 p-3.5 rounded-xl bg-blue-50/70 border border-blue-100 text-[11px] text-slate-600 leading-relaxed">
-                <p className="font-bold text-[#2874F0] mb-0.5">
-                  <i className="fa-solid fa-circle-info mr-1"></i>How Rider Access Works
-                </p>
-                Admin adds delivery boys in <strong>Admin Panel → Delivery Boys</strong> and assigns active orders. Once logged in, you&apos;ll see only your assigned deliveries with customer navigation, COD collection amount, and OTP delivery verification.
-              </div>
             </div>
-          </div>
+          )}
         </main>
       </div>
     );
   }
 
-  // ============================================================================
-  // RIDER DASHBOARD (LOGGED IN)
-  // ============================================================================
-  const displayedOrders = activeTab === 'active' ? activeDeliveries : completedDeliveries;
+  // ===========================================================================
+  // AUTHENTICATED RIDER DASHBOARD
+  // ===========================================================================
+  const visibleOrders = activeTab === 'active' ? activeDeliveries : completedDeliveries;
 
   return (
     <div className="min-h-screen bg-[#F1F3F6] pb-12">
-      {/* Rider Top Header */}
-      <header className="sticky top-0 z-40 bg-[#2874F0] text-white shadow-sm">
-        <div className="max-w-5xl mx-auto px-3 sm:px-4 h-14 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-9 h-9 rounded-xl bg-[#FFE500] text-[#2874F0] flex items-center justify-center shrink-0">
-              <i className="fa-solid fa-motorcycle text-base"></i>
+      {/* Rider Sticky Header */}
+      <header className="bg-[#0F172A] text-white sticky top-0 z-30 shadow-md">
+        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-xl bg-[#2874F0] flex items-center justify-center shrink-0 overflow-hidden">
+              {effectiveRider.selfiePhoto ? (
+                <img
+                  src={effectiveRider.selfiePhoto}
+                  alt={effectiveRider.name}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <Bike className="w-5 h-5 text-[#FFE500]" />
+              )}
             </div>
-            <div className="min-w-0 leading-tight">
-              <p className="text-sm sm:text-base font-extrabold tracking-tight truncate">
-                Smart <span className="text-[#FFE500]">Basket</span> Rider
-              </p>
-              <p className="text-[11px] text-blue-100 truncate">
-                {currentRider.name} · <span className="font-mono font-bold">{currentRider.riderId}</span>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <h1 className="font-bold text-sm sm:text-base truncate">{effectiveRider.name}</h1>
+                <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-bold uppercase shrink-0">
+                  {effectiveRider.riderId}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-300 truncate">
+                {effectiveRider.vehicleArea} • {effectiveRider.phone}
               </p>
             </div>
           </div>
 
           <div className="flex items-center gap-2 shrink-0">
             <button
-              type="button"
-              onClick={onExitRider}
-              className="px-2.5 sm:px-3 py-1.5 rounded-lg bg-white/15 text-white text-xs font-bold hover:bg-white/25 transition whitespace-nowrap"
+              onClick={onExit}
+              className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-xs font-semibold text-white transition"
             >
-              <i className="fa-solid fa-store sm:mr-1.5"></i>
-              <span className="hidden sm:inline">Store</span>
+              Store
             </button>
             <button
-              type="button"
-              onClick={handleRiderLogout}
-              className="px-2.5 sm:px-3 py-1.5 rounded-lg bg-white text-rose-600 text-xs font-extrabold hover:bg-rose-50 transition whitespace-nowrap"
+              onClick={() => {
+                setStoredCurrentRider(null);
+                onRiderLogout();
+              }}
+              className="px-2.5 py-1.5 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-xs font-semibold text-red-200 flex items-center gap-1 transition"
             >
-              <i className="fa-solid fa-right-from-bracket sm:mr-1.5"></i>
+              <LogOut className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Logout</span>
             </button>
           </div>
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-3 sm:px-4 py-5 space-y-5">
-        {/* Rider Profile & Shift Metrics */}
-        <div className="bg-white rounded-2xl border border-slate-200/80 p-4 sm:p-5 space-y-4 shadow-2xs">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="flex items-center gap-3.5 min-w-0">
-              <div className="w-12 h-12 rounded-full bg-blue-50 border border-blue-200 text-[#2874F0] font-extrabold text-lg flex items-center justify-center shrink-0">
-                {currentRider.name.charAt(0).toUpperCase()}
-              </div>
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h1 className="text-base sm:text-lg font-extrabold text-slate-900 truncate">
-                    {currentRider.name}
-                  </h1>
-                  <span className="px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-[#2E7D32] text-[10px] font-extrabold uppercase tracking-wide">
-                    <i className="fa-solid fa-circle text-[7px] mr-1 align-middle"></i>
-                    {currentRider.status === 'active' ? 'On Duty · Active' : 'Inactive'}
-                  </span>
-                </div>
-                <p className="text-xs text-slate-600 mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5">
-                  <span className="font-mono font-semibold text-slate-700">
-                    ID: {currentRider.riderId}
-                  </span>
-                  <span>
-                    <i className="fa-solid fa-phone text-[10px] mr-1 text-slate-400"></i>
-                    +91 {currentRider.phone}
-                  </span>
-                  {currentRider.vehicleArea && (
-                    <span>
-                      <i className="fa-solid fa-route text-[10px] mr-1 text-slate-400"></i>
-                      {currentRider.vehicleArea}
-                    </span>
-                  )}
-                </p>
-              </div>
-            </div>
+      <main className="max-w-4xl mx-auto px-4 pt-4 space-y-4">
+        {/* Shift Summary Metrics including COD Cash in Hand */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3">
+          <div className="bg-white rounded-xl p-3.5 border border-gray-200/80 shadow-sm">
+            <p className="text-[11px] font-semibold text-gray-500 uppercase">Active</p>
+            <p className="text-xl sm:text-2xl font-extrabold text-[#2874F0] mt-0.5">
+              {activeDeliveries.length}
+            </p>
           </div>
-
-          <div className="grid grid-cols-3 gap-2.5 sm:gap-3.5">
-            <div className="rounded-xl bg-blue-50/70 border border-blue-100 p-3">
-              <p className="text-[11px] font-semibold text-slate-600">Active Deliveries</p>
-              <p className="mt-0.5 text-xl font-extrabold text-[#2874F0] font-mono tabular-nums">
-                {activeDeliveries.length}
-              </p>
-            </div>
-            <div className="rounded-xl bg-emerald-50/70 border border-emerald-100 p-3">
-              <p className="text-[11px] font-semibold text-slate-600">Completed</p>
-              <p className="mt-0.5 text-xl font-extrabold text-[#2E7D32] font-mono tabular-nums">
-                {completedDeliveries.length}
-              </p>
-            </div>
-            <div className="rounded-xl bg-amber-50/80 border border-amber-200 p-3">
-              <p className="text-[11px] font-semibold text-amber-900">COD to Collect</p>
-              <p className="mt-0.5 text-lg sm:text-xl font-extrabold text-amber-900 font-mono tabular-nums truncate">
-                {formatINR(codToCollectTotal)}
-              </p>
-            </div>
+          <div className="bg-white rounded-xl p-3.5 border border-gray-200/80 shadow-sm">
+            <p className="text-[11px] font-semibold text-gray-500 uppercase">Completed</p>
+            <p className="text-xl sm:text-2xl font-extrabold text-emerald-600 mt-0.5">
+              {completedDeliveries.length}
+            </p>
+          </div>
+          <div className="bg-white rounded-xl p-3.5 border border-amber-200/80 shadow-sm">
+            <p className="text-[11px] font-semibold text-amber-700 uppercase">COD to Collect</p>
+            <p className="text-lg sm:text-xl font-extrabold text-amber-600 mt-0.5">
+              {formatINR(codPendingToCollect)}
+            </p>
+          </div>
+          <div className="bg-gradient-to-br from-emerald-600 to-emerald-700 rounded-xl p-3.5 text-white shadow-sm">
+            <p className="text-[10px] font-bold text-emerald-100 uppercase flex items-center gap-1">
+              <Wallet className="w-3 h-3" /> COD Cash in Hand
+            </p>
+            <p className="text-lg sm:text-xl font-extrabold mt-0.5">
+              {formatINR(effectiveRider.codCashInHand || 0)}
+            </p>
           </div>
         </div>
 
         {/* Active vs Completed Tabs */}
-        <div className="grid grid-cols-2 p-1 bg-slate-200/80 rounded-xl">
+        <div className="bg-white rounded-xl p-1.5 border border-gray-200/80 shadow-sm flex gap-1.5">
           <button
-            type="button"
             onClick={() => setActiveTab('active')}
-            className={`py-2.5 px-3 text-xs sm:text-sm font-extrabold rounded-lg transition flex items-center justify-center gap-2 ${
+            className={`flex-1 py-2.5 rounded-lg text-xs sm:text-sm font-bold transition flex items-center justify-center gap-2 ${
               activeTab === 'active'
-                ? 'bg-white text-[#2874F0] shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
+                ? 'bg-[#2874F0] text-white shadow-sm'
+                : 'text-gray-600 hover:bg-gray-50'
             }`}
           >
-            <i className="fa-solid fa-box-open"></i>
-            <span>Active Deliveries ({activeDeliveries.length})</span>
+            <Truck className="w-4 h-4" />
+            Active Deliveries ({activeDeliveries.length})
           </button>
           <button
-            type="button"
             onClick={() => setActiveTab('completed')}
-            className={`py-2.5 px-3 text-xs sm:text-sm font-extrabold rounded-lg transition flex items-center justify-center gap-2 ${
+            className={`flex-1 py-2.5 rounded-lg text-xs sm:text-sm font-bold transition flex items-center justify-center gap-2 ${
               activeTab === 'completed'
-                ? 'bg-white text-[#2E7D32] shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
+                ? 'bg-emerald-600 text-white shadow-sm'
+                : 'text-gray-600 hover:bg-gray-50'
             }`}
           >
-            <i className="fa-solid fa-circle-check"></i>
-            <span>Completed Deliveries ({completedDeliveries.length})</span>
+            <CheckCircle2 className="w-4 h-4" />
+            Completed ({completedDeliveries.length})
           </button>
         </div>
 
-        {/* Delivery Cards List */}
-        {displayedOrders.length === 0 ? (
-          <div className="bg-white rounded-2xl border border-slate-200/80 p-10 text-center space-y-2.5">
-            <div className="w-14 h-14 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mx-auto">
-              <i
-                className={`fa-solid ${
-                  activeTab === 'active' ? 'fa-motorcycle' : 'fa-clipboard-check'
-                } text-2xl`}
-              ></i>
-            </div>
-            <h2 className="text-base font-extrabold text-slate-800">
+        {/* Delivery Cards */}
+        {visibleOrders.length === 0 ? (
+          <div className="bg-white rounded-2xl border border-gray-200/80 p-10 text-center">
+            <Package className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+            <h3 className="font-bold text-gray-800 text-base">
+              {activeTab === 'active' ? 'No Active Deliveries Assigned' : 'No Completed Deliveries Yet'}
+            </h3>
+            <p className="text-xs text-gray-500 mt-1 max-w-sm mx-auto">
               {activeTab === 'active'
-                ? 'No Active Deliveries Assigned'
-                : 'No Completed Deliveries Yet'}
-            </h2>
-            <p className="text-xs text-slate-500 max-w-sm mx-auto">
-              {activeTab === 'active'
-                ? 'When Smart Basket Admin assigns orders to you, they will appear here automatically in real time.'
-                : 'Orders you verify via the customer’s 4-digit Delivery OTP will be listed here.'}
+                ? 'When Smart Basket Admin assigns an order to you, it will appear here instantly.'
+                : 'Your OTP-verified delivered orders will be listed here.'}
             </p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {displayedOrders.map((ord) => {
-              const onlinePaid = isOnlinePaidOrder(ord);
-              const pincode = extractPincodeFromAddress(ord.address, ord.pincode);
-              const deliveryStage = getOrderDeliveryStage(ord) || 'Assigned';
-              const isOutForDelivery = ord.status === 'Out for Delivery';
-              const isCompleted = activeTab === 'completed';
-              const cleanCustomerPhone = (ord.phone || '').replace(/\D/g, '').slice(-10);
-              const mapDestination = encodeURIComponent(
-                pincode && !ord.address.includes(pincode)
-                  ? `${ord.address}, ${pincode}, India`
-                  : `${ord.address}, India`
+          <div className="space-y-3.5">
+            {visibleOrders.map((order) => {
+              const onlinePaid = isOnlinePaidOrder(order);
+              const totalAmt = Number(order.total_amount ?? order.total ?? 0);
+              const pincode = extractPincodeFromAddress(order.address, order.pincode);
+              const mapsQuery = encodeURIComponent(
+                pincode && !order.address.includes(pincode)
+                  ? `${order.address}, ${pincode}`
+                  : order.address
               );
-              const googleMapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${mapDestination}`;
+              const mapsUrl = `https://www.google.com/maps/search/?api=1&query=${mapsQuery}`;
+              const cleanPhone = order.phone.replace(/[^\d+]/g, '');
+              const isOutForDelivery = order.status === 'Out for Delivery';
+              const isDelivered =
+                order.status === 'Delivered' ||
+                order.status === 'Return Requested' ||
+                order.status === 'Return Approved' ||
+                order.status === 'Refunded';
+              const hasLiveGps =
+                typeof order.riderLiveLat === 'number' && typeof order.riderLiveLng === 'number';
 
               return (
-                <article
-                  key={ord.docId || ord.id}
-                  className={`bg-white rounded-2xl border overflow-hidden shadow-2xs flex flex-col justify-between ${
-                    isOutForDelivery
-                      ? 'border-[#2874F0]/60 ring-1 ring-blue-100'
-                      : 'border-slate-200/90'
-                  }`}
+                <div
+                  key={order.docId || order.id}
+                  className="bg-white rounded-2xl border border-gray-200/90 shadow-sm overflow-hidden"
                 >
-                  <div className="p-4 sm:p-5 space-y-3.5">
-                    {/* Card Top: Order ID + Status Pill */}
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-sm font-extrabold text-slate-900">
-                            Order #{ord.id}
-                          </span>
-                          <span className="text-[11px] text-slate-400">
-                            {new Date(ord.created_at).toLocaleDateString('en-IN', {
-                              day: '2-digit',
-                              month: 'short',
-                            })}
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-slate-500 mt-0.5">
-                          {ord.items.reduce((sum, it) => sum + Number(it.quantity || 1), 0)} item(s)
-                        </p>
-                      </div>
+                  {/* Card Header */}
+                  <div className="px-4 py-3 bg-gray-50/90 border-b border-gray-100 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="font-extrabold text-sm text-gray-900">
+                        Order #{order.id}
+                      </span>
                       <span
-                        className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold uppercase tracking-wide inline-flex items-center gap-1.5 shrink-0 ${
-                          deliveryStage === 'Delivered'
-                            ? 'bg-emerald-50 border border-emerald-200 text-[#2E7D32]'
-                            : deliveryStage === 'Out for Delivery'
-                            ? 'bg-blue-50 border border-blue-200 text-[#2874F0]'
-                            : 'bg-amber-50 border border-amber-200 text-amber-800'
+                        className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                          isDelivered
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : isOutForDelivery
+                            ? 'bg-orange-100 text-orange-800'
+                            : 'bg-blue-100 text-blue-800'
                         }`}
                       >
-                        <i
-                          className={`fa-solid ${
-                            deliveryStage === 'Delivered'
-                              ? 'fa-circle-check'
-                              : deliveryStage === 'Out for Delivery'
-                              ? 'fa-motorcycle'
-                              : 'fa-clipboard-list'
-                          } text-[10px]`}
-                        ></i>
-                        <span>{deliveryStage}</span>
+                        {isDelivered ? 'Delivered' : isOutForDelivery ? 'Out for Delivery' : 'Assigned'}
                       </span>
                     </div>
-
-                    {/* Prominent Payment Collection Badge */}
-                    {onlinePaid ? (
-                      <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span className="w-8 h-8 rounded-lg bg-[#2E7D32] text-white flex items-center justify-center shrink-0">
-                            <i className="fa-solid fa-check-double text-xs"></i>
-                          </span>
-                          <div className="min-w-0">
-                            <p className="text-xs font-extrabold text-[#1B5E20] tracking-wide">
-                              PAID ONLINE
-                            </p>
-                            <p className="text-[11px] font-semibold text-emerald-800">
-                              ₹0 to collect · Hand over after OTP verification
-                            </p>
-                          </div>
-                        </div>
-                        <span className="font-mono text-sm font-extrabold text-[#2E7D32] shrink-0">
-                          ₹0
-                        </span>
-                      </div>
-                    ) : (
-                      <div className="p-3 rounded-xl bg-amber-50 border-2 border-amber-300 flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2 min-w-0">
-                          <span className="w-8 h-8 rounded-lg bg-[#FB641B] text-white flex items-center justify-center shrink-0">
-                            <i className="fa-solid fa-indian-rupee-sign text-xs"></i>
-                          </span>
-                          <div className="min-w-0">
-                            <p className="text-xs font-extrabold text-amber-950 tracking-wide">
-                              COLLECT CASH (COD): {formatINR(ord.total_amount)}
-                            </p>
-                            <p className="text-[11px] font-semibold text-amber-800">
-                              Collect cash before confirming Delivery OTP
-                            </p>
-                          </div>
-                        </div>
-                        <span className="font-mono text-sm font-extrabold text-amber-950 shrink-0 tabular-nums">
-                          {formatINR(ord.total_amount)}
-                        </span>
-                      </div>
-                    )}
-
-                    {/* Customer Name, Full Address & Pincode */}
-                    <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/70 space-y-1.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="text-sm font-extrabold text-slate-900 flex items-center gap-2 min-w-0">
-                          <i className="fa-solid fa-user text-[#2874F0] text-xs shrink-0"></i>
-                          <span className="truncate">{ord.name}</span>
-                        </p>
-                        {pincode && (
-                          <span className="px-2 py-0.5 rounded bg-white border border-slate-200 font-mono text-[11px] font-extrabold text-slate-800 shrink-0">
-                            PIN: {pincode}
-                          </span>
-                        )}
-                      </div>
-                      <p className="text-xs text-slate-700 leading-relaxed flex items-start gap-2">
-                        <i className="fa-solid fa-location-dot text-rose-500 text-xs mt-0.5 shrink-0"></i>
-                        <span className="select-text">{ord.address}</span>
-                      </p>
-                      <p className="text-xs font-mono font-semibold text-slate-600 flex items-center gap-2">
-                        <i className="fa-solid fa-phone text-[#2E7D32] text-[11px] shrink-0"></i>
-                        <span>{ord.phone || 'Phone not provided'}</span>
-                      </p>
-                    </div>
-
-                    {/* Items Preview */}
-                    <div className="space-y-1.5">
-                      <p className="text-[10px] font-extrabold uppercase tracking-wider text-slate-400">
-                        Parcel Contents
-                      </p>
-                      <div className="space-y-1">
-                        {ord.items.map((it) => (
-                          <div
-                            key={it.id}
-                            className="flex items-center justify-between gap-2 text-xs text-slate-700"
-                          >
-                            <span className="truncate font-medium">
-                              {it.product_name}
-                            </span>
-                            <span className="font-mono font-bold text-slate-900 shrink-0">
-                              × {it.quantity}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Direct Call Customer & Open in Google Maps Buttons */}
-                    <div className="grid grid-cols-2 gap-2.5 pt-1">
-                      <a
-                        href={cleanCustomerPhone ? `tel:+91${cleanCustomerPhone}` : `tel:${ord.phone}`}
-                        className="h-10 px-3 rounded-xl bg-emerald-50 border border-emerald-200 text-[#1B5E20] text-xs font-extrabold hover:bg-emerald-100 transition flex items-center justify-center gap-1.5"
-                      >
-                        <i className="fa-solid fa-phone"></i>
-                        <span>Call Customer</span>
-                      </a>
-                      <a
-                        href={googleMapsUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="h-10 px-3 rounded-xl bg-blue-50 border border-blue-200 text-[#2874F0] text-xs font-extrabold hover:bg-blue-100 transition flex items-center justify-center gap-1.5"
-                      >
-                        <i className="fa-solid fa-map-location-dot"></i>
-                        <span>Open in Google Maps</span>
-                      </a>
-                    </div>
+                    <span className="text-[11px] text-gray-500 flex items-center gap-1">
+                      <Clock className="w-3.5 h-3.5" />
+                      {new Date(order.created_at).toLocaleDateString('en-IN', {
+                        day: 'numeric',
+                        month: 'short',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
+                    </span>
                   </div>
 
-                  {/* Card Footer: Status Action Buttons */}
-                  {!isCompleted ? (
-                    <div className="px-4 sm:px-5 py-3.5 bg-slate-50 border-t border-slate-200/80 grid grid-cols-2 gap-2.5">
-                      <button
-                        type="button"
-                        onClick={() => handleMarkOutForDelivery(ord)}
-                        disabled={isOutForDelivery}
-                        className={`h-11 px-3 rounded-xl text-xs font-extrabold transition flex items-center justify-center gap-1.5 ${
-                          isOutForDelivery
-                            ? 'bg-blue-100 text-[#2874F0] border border-blue-200 cursor-default'
-                            : 'bg-[#2874F0] text-white hover:bg-[#1e60d5]'
-                        }`}
-                      >
-                        <i
-                          className={`fa-solid ${
-                            isOutForDelivery ? 'fa-check' : 'fa-motorcycle'
-                          }`}
-                        ></i>
-                        <span>
-                          {isOutForDelivery ? 'Out for Delivery' : 'Out for Delivery'}
-                        </span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => openOtpVerificationModal(ord)}
-                        className="h-11 px-3 rounded-xl bg-[#2E7D32] text-white text-xs font-extrabold hover:bg-emerald-800 transition flex items-center justify-center gap-1.5 shadow-2xs"
-                      >
-                        <i className="fa-solid fa-shield-check"></i>
-                        <span>Mark Delivered</span>
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="px-4 sm:px-5 py-3 bg-emerald-50/70 border-t border-emerald-100 flex items-center justify-between text-xs">
-                      <span className="font-extrabold text-[#1B5E20] inline-flex items-center gap-1.5">
-                        <i className="fa-solid fa-circle-check"></i>
-                        <span>
-                          {ord.deliveryOtpVerified
-                            ? 'Delivered · 4-Digit OTP Verified'
-                            : 'Delivery Completed'}
-                        </span>
+                  {/* Prominent Payment Collection Banner */}
+                  <div
+                    className={`px-4 py-2.5 flex items-center justify-between gap-2 border-b ${
+                      onlinePaid
+                        ? 'bg-emerald-50 border-emerald-100 text-emerald-900'
+                        : 'bg-amber-50 border-amber-200 text-amber-950'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      {onlinePaid ? (
+                        <CreditCard className="w-4 h-4 text-emerald-600 shrink-0" />
+                      ) : (
+                        <IndianRupee className="w-4 h-4 text-amber-700 shrink-0" />
+                      )}
+                      <span className="text-xs sm:text-sm font-extrabold tracking-tight">
+                        {onlinePaid
+                          ? 'PAID ONLINE (₹0 to collect)'
+                          : `COLLECT CASH (COD): ${formatINR(totalAmt)}`}
                       </span>
-                      {ord.deliveredAt && (
-                        <span className="text-[11px] text-emerald-800 font-mono">
-                          {new Date(ord.deliveredAt).toLocaleString('en-IN', {
-                            day: '2-digit',
-                            month: 'short',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })}
+                    </div>
+                    <span
+                      className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase ${
+                        onlinePaid ? 'bg-emerald-600 text-white' : 'bg-amber-600 text-white'
+                      }`}
+                    >
+                      {onlinePaid ? 'Prepaid' : 'COD'}
+                    </span>
+                  </div>
+
+                  {/* Customer & Address Details */}
+                  <div className="p-4 space-y-3">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-gray-500 uppercase">Customer</p>
+                        <p className="text-base font-bold text-gray-900">{order.name}</p>
+                        <p className="text-xs text-gray-600 mt-0.5">{order.phone}</p>
+                      </div>
+                      {pincode && (
+                        <span className="px-2.5 py-1 rounded-lg bg-slate-100 text-slate-800 text-xs font-bold shrink-0">
+                          PIN: {pincode}
                         </span>
                       )}
                     </div>
-                  )}
-                </article>
+
+                    <div className="bg-slate-50 rounded-xl p-3 border border-slate-200/70 flex items-start gap-2.5">
+                      <MapPin className="w-4 h-4 text-[#2874F0] shrink-0 mt-0.5" />
+                      <p className="text-xs sm:text-sm text-gray-800 leading-relaxed">
+                        {order.address}
+                      </p>
+                    </div>
+
+                    {/* Items summary */}
+                    <div className="text-xs text-gray-600 flex flex-wrap gap-1.5">
+                      {order.items.map((it) => (
+                        <span
+                          key={`${order.id}_${it.id}`}
+                          className="px-2 py-1 rounded bg-gray-100 text-gray-700 font-medium"
+                        >
+                          {it.product_name} × {it.quantity}
+                        </span>
+                      ))}
+                    </div>
+
+                    {/* Live GPS Status Banner when Out for Delivery */}
+                    {isOutForDelivery && (
+                      <div className="rounded-xl bg-blue-50 border border-blue-200 p-3 flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 text-xs text-blue-900">
+                          <LocateFixed className="w-4 h-4 text-[#2874F0] shrink-0" />
+                          <div>
+                            <p className="font-bold">
+                              {hasLiveGps
+                                ? 'Live GPS Sharing Active'
+                                : 'GPS Coordinates Not Captured Yet'}
+                            </p>
+                            {hasLiveGps && (
+                              <p className="text-[10px] text-blue-700">
+                                {order.riderLiveLat?.toFixed(5)}, {order.riderLiveLng?.toFixed(5)}
+                                {order.riderLocationUpdatedAt
+                                  ? ` • Updated ${new Date(order.riderLocationUpdatedAt).toLocaleTimeString('en-IN', {
+                                      hour: '2-digit',
+                                      minute: '2-digit',
+                                    })}`
+                                  : ''}
+                              </p>
+                            )}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleRefreshLiveGps(order)}
+                          disabled={gpsBusyOrderId === order.id}
+                          className="px-3 py-1.5 rounded-lg bg-[#2874F0] hover:bg-[#1e60d5] text-white text-[11px] font-bold flex items-center gap-1.5 transition disabled:opacity-60"
+                        >
+                          <RefreshCw
+                            className={`w-3.5 h-3.5 ${gpsBusyOrderId === order.id ? 'animate-spin' : ''}`}
+                          />
+                          {gpsBusyOrderId === order.id ? 'Updating...' : 'Update Live GPS'}
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Call Customer + Open in Google Maps */}
+                    <div className="grid grid-cols-2 gap-2.5 pt-1">
+                      <a
+                        href={`tel:${cleanPhone}`}
+                        className="py-2.5 px-3 rounded-xl border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold text-xs sm:text-sm flex items-center justify-center gap-2 transition"
+                      >
+                        <Phone className="w-4 h-4" />
+                        Call Customer
+                      </a>
+                      <a
+                        href={mapsUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="py-2.5 px-3 rounded-xl border border-blue-200 bg-blue-50 hover:bg-blue-100 text-[#2874F0] font-bold text-xs sm:text-sm flex items-center justify-center gap-2 transition"
+                      >
+                        <Navigation className="w-4 h-4" />
+                        Open in Google Maps
+                      </a>
+                    </div>
+
+                    {/* Status Update Action Buttons */}
+                    {!isDelivered ? (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2 border-t border-gray-100">
+                        <button
+                          type="button"
+                          disabled={isOutForDelivery || busyOrderId === order.id}
+                          onClick={() => handleMarkOutForDelivery(order)}
+                          className={`py-2.5 px-4 rounded-xl font-bold text-xs sm:text-sm flex items-center justify-center gap-2 transition ${
+                            isOutForDelivery
+                              ? 'bg-orange-100 text-orange-700 cursor-default'
+                              : 'bg-[#2874F0] hover:bg-[#1e60d5] text-white shadow-sm'
+                          }`}
+                        >
+                          <LocateFixed className="w-4 h-4" />
+                          {busyOrderId === order.id
+                            ? 'Capturing GPS...'
+                            : isOutForDelivery
+                            ? 'Out for Delivery ✓'
+                            : 'Out for Delivery (Share GPS)'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => openOtpModal(order)}
+                          className="py-2.5 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs sm:text-sm flex items-center justify-center gap-2 shadow-sm transition"
+                        >
+                          <KeyRound className="w-4 h-4" />
+                          Mark Delivered (OTP)
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="pt-2 border-t border-gray-100 flex items-center justify-between text-xs text-emerald-700 font-semibold">
+                        <span className="flex items-center gap-1.5">
+                          <BadgeCheck className="w-4 h-4 text-emerald-600" />
+                          OTP Verified & Delivered
+                        </span>
+                        {order.deliveredAt && (
+                          <span className="text-gray-500 font-normal">
+                            {new Date(order.deliveredAt).toLocaleDateString('en-IN', {
+                              day: 'numeric',
+                              month: 'short',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
               );
             })}
           </div>
@@ -702,44 +1175,41 @@ export const RiderView: React.FC<Props> = ({
 
       {/* 4-Digit Delivery OTP Verification Modal */}
       {otpModalOrder && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
-          <div className="w-full max-w-sm bg-white rounded-2xl shadow-2xl overflow-hidden">
-            <div className="bg-[#2E7D32] px-5 py-4 text-white flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <i className="fa-solid fa-key text-[#FFE500]"></i>
-                <div>
-                  <h2 className="text-sm font-extrabold">Verify Delivery OTP</h2>
-                  <p className="text-[11px] text-emerald-100 font-mono">
-                    Order #{otpModalOrder.id} · {otpModalOrder.name}
-                  </p>
-                </div>
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white w-full max-w-sm rounded-2xl shadow-2xl overflow-hidden">
+            <div className="bg-[#0F172A] px-5 py-4 text-white flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <KeyRound className="w-5 h-5 text-[#FFE500]" />
+                <h3 className="font-bold text-sm">Verify Delivery OTP</h3>
               </div>
               <button
-                type="button"
                 onClick={() => setOtpModalOrder(null)}
-                className="w-8 h-8 rounded-lg flex items-center justify-center text-white hover:bg-white/15"
+                className="p-1 rounded-lg hover:bg-white/10 text-white/80"
               >
-                <i className="fa-solid fa-xmark"></i>
+                <X className="w-4 h-4" />
               </button>
             </div>
 
-            <form onSubmit={handleVerifyAndDeliver} className="p-5 space-y-4">
-              {isOnlinePaidOrder(otpModalOrder) ? (
-                <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-bold text-[#1B5E20] flex items-center gap-2">
-                  <i className="fa-solid fa-circle-check"></i>
-                  <span>PAID ONLINE — ₹0 cash to collect from customer.</span>
-                </div>
-              ) : (
-                <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-xs font-extrabold text-amber-950 flex items-center gap-2">
-                  <i className="fa-solid fa-indian-rupee-sign text-[#FB641B]"></i>
-                  <span>
-                    Collect Cash (COD): {formatINR(otpModalOrder.total_amount)} before completing delivery.
-                  </span>
-                </div>
-              )}
+            <form onSubmit={handleVerifyDeliveryOtp} className="p-5 space-y-4">
+              <div className="bg-slate-50 rounded-xl p-3 border border-slate-200 text-xs space-y-1">
+                <p className="font-bold text-gray-900">
+                  Order #{otpModalOrder.id} — {otpModalOrder.name}
+                </p>
+                <p
+                  className={`font-extrabold ${
+                    isOnlinePaidOrder(otpModalOrder) ? 'text-emerald-700' : 'text-amber-700'
+                  }`}
+                >
+                  {isOnlinePaidOrder(otpModalOrder)
+                    ? 'PAID ONLINE (Collect ₹0)'
+                    : `Collect COD Cash: ${formatINR(
+                        Number(otpModalOrder.total_amount ?? otpModalOrder.total ?? 0)
+                      )}`}
+                </p>
+              </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1.5">
+                <label className="block text-xs font-bold text-gray-700 mb-1.5">
                   Ask customer for their 4-digit Delivery OTP
                 </label>
                 <input
@@ -747,38 +1217,34 @@ export const RiderView: React.FC<Props> = ({
                   inputMode="numeric"
                   maxLength={4}
                   autoFocus
+                  required
                   value={otpInput}
                   onChange={(e) => {
                     setOtpError('');
                     setOtpInput(e.target.value.replace(/\D/g, '').slice(0, 4));
                   }}
                   placeholder="• • • •"
-                  className="w-full h-14 px-4 rounded-xl bg-slate-50 border-2 border-slate-300 text-center text-2xl font-mono font-extrabold tracking-[0.55em] text-slate-900 focus:bg-white focus:border-[#2E7D32] focus:outline-none"
+                  className="w-full text-center tracking-[0.6em] font-extrabold text-2xl py-3 rounded-xl border-2 border-gray-300 focus:border-[#2874F0] outline-none"
                 />
+                {otpError && (
+                  <p className="text-xs font-semibold text-red-600 mt-2">{otpError}</p>
+                )}
               </div>
 
-              {otpError && (
-                <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold flex items-start gap-2">
-                  <i className="fa-solid fa-circle-exclamation mt-0.5 shrink-0"></i>
-                  <span>{otpError}</span>
-                </div>
-              )}
-
-              <div className="grid grid-cols-2 gap-2.5 pt-1">
+              <div className="flex gap-2">
                 <button
                   type="button"
                   onClick={() => setOtpModalOrder(null)}
-                  className="h-11 rounded-xl bg-slate-100 text-slate-700 text-xs font-bold hover:bg-slate-200 transition"
+                  className="flex-1 py-2.5 rounded-xl border border-gray-300 text-gray-700 font-bold text-xs"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={otpBusy || otpInput.length !== 4}
-                  className="h-11 rounded-xl bg-[#2E7D32] text-white text-xs font-extrabold hover:bg-emerald-800 disabled:opacity-50 disabled:cursor-not-allowed transition flex items-center justify-center gap-1.5"
+                  disabled={verifyingOtp || otpInput.length !== 4}
+                  className="flex-1 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs disabled:opacity-50 transition"
                 >
-                  <i className="fa-solid fa-check-circle"></i>
-                  <span>{otpBusy ? 'Verifying...' : 'Confirm Delivery'}</span>
+                  {verifyingOtp ? 'Verifying...' : 'Confirm Delivery'}
                 </button>
               </div>
             </form>
