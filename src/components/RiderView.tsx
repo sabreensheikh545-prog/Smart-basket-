@@ -42,7 +42,12 @@ import {
   verifyAndDeliverOrderFirestore,
 } from '../services/firestoreService';
 import { setStoredCurrentRider } from '../store/localStore';
-import { IndianPincodeField, PhoneOtpField } from './IndianVerificationFields';
+import {
+  EmailVerificationField,
+  IndianMobileField,
+  IndianPincodeField,
+  MobileAvailabilityState,
+} from './IndianVerificationFields';
 import {
   PincodeLookupResult,
   isValidAadhaarVerhoeff,
@@ -135,8 +140,13 @@ export const RiderView: React.FC<RiderViewProps> = ({
   // KYC Self-Registration form state
   const [regName, setRegName] = useState('');
   const [regPhone, setRegPhone] = useState('');
-  const [regVerifiedPhone, setRegVerifiedPhone] = useState<string | null>(null);
+  const [regMobileStatus, setRegMobileStatus] = useState<MobileAvailabilityState>({
+    validFormat: false,
+    checking: false,
+    available: false,
+  });
   const [regEmail, setRegEmail] = useState('');
+  const [regVerifiedEmail, setRegVerifiedEmail] = useState<string | null>(null);
   const [regPincode, setRegPincode] = useState('');
   const [regSelectedPostOffice, setRegSelectedPostOffice] = useState('');
   const [regPincodeResult, setRegPincodeResult] = useState<PincodeLookupResult | null>(null);
@@ -270,8 +280,14 @@ export const RiderView: React.FC<RiderViewProps> = ({
   };
 
   const cleanRegPhone = regPhone.replace(/\D/g, '').slice(0, 10);
-  const isRegPhoneOtpVerified = Boolean(
-    regVerifiedPhone && regVerifiedPhone === cleanRegPhone && isValidIndianMobile(cleanRegPhone)
+  const cleanRegEmail = regEmail.trim().toLowerCase();
+  const isRegEmailVerified = Boolean(
+    regVerifiedEmail &&
+      regVerifiedEmail.toLowerCase() === cleanRegEmail &&
+      /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanRegEmail)
+  );
+  const isRegMobileAvailable = Boolean(
+    isValidIndianMobile(cleanRegPhone) && !regMobileStatus.checking && regMobileStatus.available
   );
   const isRegPincodeVerified = Boolean(regPincodeResult?.valid);
   const isRegVehicleValid = isValidIndianVehicleNumber(regVehicleNumber);
@@ -280,7 +296,8 @@ export const RiderView: React.FC<RiderViewProps> = ({
   const isRegPinValid = /^\d{4}$/.test(regPin);
   const canSubmitKyc =
     regName.trim().length >= 2 &&
-    isRegPhoneOtpVerified &&
+    isRegEmailVerified &&
+    isRegMobileAvailable &&
     isRegPincodeVerified &&
     isRegVehicleValid &&
     isRegAadhaarValid &&
@@ -293,12 +310,19 @@ export const RiderView: React.FC<RiderViewProps> = ({
       showToast('Please enter your Full Name.', 'error');
       return;
     }
+    if (!isRegEmailVerified) {
+      showToast('Please verify your Email Address via Firebase verification link before submitting.', 'error');
+      return;
+    }
     if (!isValidIndianMobile(cleanRegPhone)) {
       showToast('Enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.', 'error');
       return;
     }
-    if (!isRegPhoneOtpVerified) {
-      showToast('Please verify your Mobile Number via SMS OTP before submitting.', 'error');
+    if (!isRegMobileAvailable) {
+      showToast(
+        regMobileStatus.error || 'This mobile number is already registered or still being checked.',
+        'error'
+      );
       return;
     }
     if (!regPincodeResult?.valid) {
@@ -331,7 +355,7 @@ export const RiderView: React.FC<RiderViewProps> = ({
     const res = await submitRiderKycApplicationFirestore({
       name: regName,
       phone: cleanRegPhone,
-      email: regEmail,
+      email: cleanRegEmail,
       areaPincode: resolvedAreaPincode,
       vehicleType: regVehicleType,
       vehicleNumber: regVehicleNumber.trim().toUpperCase(),
@@ -608,43 +632,38 @@ export const RiderView: React.FC<RiderViewProps> = ({
               </div>
 
               <form onSubmit={handleKycSubmit} className="p-5 sm:p-6 space-y-4">
-                {/* Personal Details */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                  <div>
-                    <label className="block text-xs font-bold text-gray-700 mb-1">
-                      Full Name <span className="text-rose-500">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={regName}
-                      onChange={(e) => setRegName(e.target.value)}
-                      placeholder="e.g., Rahul Sharma"
-                      className="w-full h-11 px-3 rounded-lg border border-gray-300 text-sm focus:ring-2 focus:ring-[#2874F0] outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-gray-700 mb-1">
-                      Email (Optional)
-                    </label>
-                    <input
-                      type="email"
-                      value={regEmail}
-                      onChange={(e) => setRegEmail(e.target.value)}
-                      placeholder="rider@email.com"
-                      className="w-full h-11 px-3 rounded-lg border border-gray-300 text-sm focus:ring-2 focus:ring-[#2874F0] outline-none"
-                    />
-                  </div>
+                {/* Full Name */}
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 mb-1">
+                    Full Name <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={regName}
+                    onChange={(e) => setRegName(e.target.value)}
+                    placeholder="e.g., Rahul Sharma"
+                    className="w-full h-11 px-3 rounded-lg border border-gray-300 text-sm focus:ring-2 focus:ring-[#2874F0] outline-none"
+                  />
                 </div>
 
-                {/* Mandatory Firebase Phone SMS OTP Verification */}
-                <PhoneOtpField
+                {/* Mandatory Firebase Email Verification (APK-Compatible, Zero reCAPTCHA) */}
+                <EmailVerificationField
+                  label="Email Address"
+                  email={regEmail}
+                  onEmailChange={setRegEmail}
+                  verifiedEmail={regVerifiedEmail}
+                  onVerifiedChange={setRegVerifiedEmail}
+                  onToast={showToast}
+                />
+
+                {/* Strict Indian Mobile Format + Live Firestore Duplicate Check */}
+                <IndianMobileField
                   label="10-Digit Indian Mobile Number"
                   phone={regPhone}
                   onPhoneChange={setRegPhone}
-                  verifiedPhone={regVerifiedPhone}
-                  onVerifiedChange={setRegVerifiedPhone}
-                  onToast={showToast}
+                  onAvailabilityChange={setRegMobileStatus}
+                  excludeRiderEmail={cleanRegEmail || undefined}
                 />
 
                 {/* Strict India Post 6-Digit Pincode Lookup */}
@@ -922,7 +941,8 @@ export const RiderView: React.FC<RiderViewProps> = ({
                   </p>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[11px] font-semibold">
                     {[
-                      { label: 'Mobile Verified via SMS OTP', ok: isRegPhoneOtpVerified },
+                      { label: 'Email Verified via Firebase', ok: isRegEmailVerified },
+                      { label: 'Mobile Format & Uniqueness Valid', ok: isRegMobileAvailable },
                       { label: 'India Post Pincode Verified', ok: isRegPincodeVerified },
                       { label: 'Valid Indian RTO Vehicle No.', ok: isRegVehicleValid },
                       { label: 'Aadhaar Verhoeff Checksum Valid', ok: isRegAadhaarValid },

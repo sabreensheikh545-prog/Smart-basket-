@@ -16,12 +16,12 @@ const app = getApps().find((a) => a.name === '[DEFAULT]') || initializeApp(fireb
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 
-// Isolated Firebase Auth instance for SMS OTP phone verification during Seller & Rider onboarding
-// so verifying a mobile OTP never overwrites or logs out the user's primary Email/Google session.
-const phoneOtpApp =
-  getApps().find((a) => a.name === 'smart-basket-phone-otp') ||
-  initializeApp(firebaseConfig, 'smart-basket-phone-otp');
-export const phoneOtpAuth = getAuth(phoneOtpApp);
+// Isolated Firebase Auth instance for Rider email verification so verifying an applicant's
+// email never overwrites or disrupts the primary storefront user session.
+const verificationApp =
+  getApps().find((a) => a.name === 'smart-basket-email-verify') ||
+  initializeApp(firebaseConfig, 'smart-basket-email-verify');
+export const verificationAuth = getAuth(verificationApp);
 
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({
@@ -31,7 +31,6 @@ googleProvider.setCustomParameters({
 export function getFirebaseAuthErrorMessage(error: unknown): string {
   const err = error as { code?: string; message?: string } | null;
   const code = err?.code?.trim() || '';
-  const message = err?.message?.trim() || '';
 
   switch (code) {
     case 'auth/invalid-credential':
@@ -41,38 +40,19 @@ export function getFirebaseAuthErrorMessage(error: unknown): string {
     case 'auth/invalid-email':
       return 'Please enter a valid email address.';
     case 'auth/email-already-in-use':
-      return 'An account with this email already exists. Please use the Login tab.';
+      return 'An account with this email already exists. Please sign in to continue.';
     case 'auth/weak-password':
       return 'Password is too weak. Please enter at least 6 characters.';
     case 'auth/user-disabled':
       return 'This account has been disabled. Please contact support.';
     case 'auth/too-many-requests':
-      return 'Too many requests or OTP attempts. Please wait a few minutes and try again.';
-    case 'auth/invalid-phone-number':
-      return 'Invalid phone number format. Enter a 10-digit Indian mobile number starting with 6-9.';
-    case 'auth/invalid-verification-code':
-      return 'Incorrect 6-digit SMS OTP. Please check the code sent to your mobile and try again.';
-    case 'auth/code-expired':
-      return 'This SMS OTP has expired. Please tap "Resend OTP" to request a new code.';
-    case 'auth/captcha-check-failed':
-      return 'reCAPTCHA verification failed. Please retry sending the OTP.';
-    case 'auth/quota-exceeded':
-      return 'Daily Firebase SMS OTP quota reached for this project. Please try again later.';
-    case 'auth/billing-not-enabled':
-      return 'Firebase Phone SMS OTP requires Phone Sign-In enabled (and Blaze plan or test phone numbers configured in Firebase Console).';
+      return 'Too many verification attempts. Please wait a couple of minutes and try again.';
     case 'auth/popup-closed-by-user':
-      return 'Google sign-in popup was closed before completion.';
+      return 'Google sign-in was closed before completion.';
     case 'auth/network-request-failed':
-      return 'Network error while connecting to Firebase. Please check your internet connection.';
-    case 'auth/unauthorized-domain':
-      return `${code}: Add this domain in Firebase Console -> Authentication -> Settings -> Authorized domains.`;
-    case 'auth/operation-not-allowed':
-      return `${code}: Enable Phone / Email / Google sign-in in Firebase Console -> Authentication -> Sign-in method.`;
+      return 'Network error. Please check your internet connection and try again.';
     default:
-      if (code && message) return `${code}: ${message}`;
-      if (code) return code;
-      if (message) return message;
-      return 'Authentication failed. Please try again.';
+      return 'Unable to complete verification right now. Please try again.';
   }
 }
 

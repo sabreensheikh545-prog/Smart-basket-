@@ -1543,6 +1543,12 @@ export function submitRiderKycApplicationLocal(payload: {
       message: 'Please enter a valid 10-digit Indian Mobile Number starting with 6, 7, 8, or 9.',
     };
   }
+  if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    return {
+      success: false,
+      message: 'Please enter and verify a valid Email Address.',
+    };
+  }
   if (cleanArea.length < 3 || !/[1-9]\d{5}/.test(cleanArea)) {
     return { success: false, message: 'Please enter a valid 6-digit Indian Pincode verified via India Post.' };
   }
@@ -1569,6 +1575,16 @@ export function submitRiderKycApplicationLocal(payload: {
   }
   if (cleanPin.length !== 4) {
     return { success: false, message: 'Please create a 4-digit numeric Login PIN.' };
+  }
+
+  const sellerWithSamePhone = getStoredSellersLocal().find(
+    (s) => s.phone.replace(/\D/g, '').slice(-10) === cleanPhone
+  );
+  if (sellerWithSamePhone) {
+    return {
+      success: false,
+      message: 'This mobile number is already registered with an existing Seller account.',
+    };
   }
 
   const list = getStoredDeliveryBoysLocal();

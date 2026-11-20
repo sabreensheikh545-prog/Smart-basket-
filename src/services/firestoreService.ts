@@ -1142,6 +1142,114 @@ export function subscribeSellerProfileFirestore(
   );
 }
 
+export async function checkDuplicateMobileFirestore(
+  rawPhone: string,
+  options?: {
+    excludeSellerEmail?: string;
+    excludeSellerUid?: string;
+    excludeRiderEmail?: string;
+    excludeRiderId?: string;
+  }
+): Promise<{ available: boolean; reason?: string }> {
+  const cleanPhone = rawPhone.replace(/\D/g, '').slice(-10);
+  if (!isValidIndianMobile(cleanPhone)) {
+    return {
+      available: false,
+      reason: 'Enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.',
+    };
+  }
+
+  const exSellerEmail = (options?.excludeSellerEmail || '').trim().toLowerCase();
+  const exSellerUid = (options?.excludeSellerUid || '').trim();
+  const exRiderEmail = (options?.excludeRiderEmail || '').trim().toLowerCase();
+  const exRiderId = (options?.excludeRiderId || '').trim();
+
+  const matchesExcludedSeller = (rec: { email?: unknown; uid?: unknown; id?: unknown; docId?: unknown }) => {
+    const email = String(rec.email || '').trim().toLowerCase();
+    const uid = String(rec.uid || rec.id || rec.docId || '').trim();
+    if (exSellerEmail && email && email === exSellerEmail) return true;
+    if (exSellerUid && uid && uid === exSellerUid) return true;
+    return false;
+  };
+
+  const matchesExcludedRider = (rec: { email?: unknown; id?: unknown; docId?: unknown; riderId?: unknown }) => {
+    const email = String(rec.email || '').trim().toLowerCase();
+    const rid = String(rec.id || rec.docId || rec.riderId || '').trim();
+    if (exRiderEmail && email && email === exRiderEmail) return true;
+    if (exRiderId && rid && rid === exRiderId) return true;
+    return false;
+  };
+
+  // 1. Check local cache first for immediate feedback
+  const localSellerDup = getStoredSellersLocal().find(
+    (s) => s.phone.replace(/\D/g, '').slice(-10) === cleanPhone && !matchesExcludedSeller(s)
+  );
+  if (localSellerDup) {
+    return {
+      available: false,
+      reason: 'This mobile number is already registered with an existing Seller account.',
+    };
+  }
+
+  const localRiderDup = getStoredDeliveryBoysLocal().find(
+    (r) =>
+      r.phone.replace(/\D/g, '').slice(-10) === cleanPhone &&
+      r.kycStatus !== 'rejected' &&
+      !matchesExcludedRider(r)
+  );
+  if (localRiderDup) {
+    return {
+      available: false,
+      reason: 'This mobile number is already registered with an existing Delivery Partner account.',
+    };
+  }
+
+  // 2. Check Firestore live across sellers, deliveryBoys, and riders collections
+  try {
+    const [sellersSnap, deliveryBoysSnap, ridersSnap] = await Promise.all([
+      getDocs(query(collection(db, 'sellers'), where('phone', '==', cleanPhone))).catch(() => null),
+      getDocs(query(collection(db, 'deliveryBoys'), where('phone', '==', cleanPhone))).catch(() => null),
+      getDocs(query(collection(db, 'riders'), where('phone', '==', cleanPhone))).catch(() => null),
+    ]);
+
+    if (sellersSnap && !sellersSnap.empty) {
+      const conflict = sellersSnap.docs.some((d) => {
+        const data = d.data() as Record<string, unknown>;
+        return !matchesExcludedSeller({ ...data, id: d.id, docId: d.id });
+      });
+      if (conflict) {
+        return {
+          available: false,
+          reason: 'This mobile number is already registered with an existing Seller account.',
+        };
+      }
+    }
+
+    const riderDocs = [
+      ...(deliveryBoysSnap ? deliveryBoysSnap.docs : []),
+      ...(ridersSnap ? ridersSnap.docs : []),
+    ];
+    if (riderDocs.length > 0) {
+      const conflict = riderDocs.some((d) => {
+        const data = d.data() as Record<string, unknown>;
+        const kycStatus = String(data.kycStatus || 'approved').toLowerCase();
+        if (kycStatus === 'rejected') return false;
+        return !matchesExcludedRider({ ...data, id: d.id, docId: d.id });
+      });
+      if (conflict) {
+        return {
+          available: false,
+          reason: 'This mobile number is already registered with an existing Delivery Partner account.',
+        };
+      }
+    }
+  } catch {
+    // Allow graceful fallback if Firestore is temporarily unreachable
+  }
+
+  return { available: true };
+}
+
 export async function registerOrUpdateSellerFirestore(payload: {
   uid?: string;
   email: string;
@@ -1184,6 +1292,17 @@ export async function registerOrUpdateSellerFirestore(payload: {
   }
   if (cleanPayoutAccount.length < 3) {
     return { success: false, message: 'Please enter a valid Bank Account or UPI ID for payouts.' };
+  }
+
+  const dupCheck = await checkDuplicateMobileFirestore(cleanPhone, {
+    excludeSellerEmail: cleanEmail,
+    excludeSellerUid: payload.uid,
+  });
+  if (!dupCheck.available) {
+    return {
+      success: false,
+      message: dupCheck.reason || 'This mobile number is already registered.',
+    };
   }
 
   const docId = payload.uid || cleanEmail.replace(/[^a-z0-9]/g, '_');
@@ -1554,6 +1673,16 @@ export async function submitRiderKycApplicationFirestore(payload: {
   selfiePhoto: string;
   loginPin: string;
 }): Promise<{ success: boolean; message: string; rider?: DeliveryBoy }> {
+  const dupCheck = await checkDuplicateMobileFirestore(payload.phone, {
+    excludeRiderEmail: payload.email,
+  });
+  if (!dupCheck.available) {
+    return {
+      success: false,
+      message: dupCheck.reason || 'This mobile number is already registered.',
+    };
+  }
+
   const localRes = submitRiderKycApplicationLocal(payload);
   if (!localRes.success || !localRes.rider) {
     return localRes;

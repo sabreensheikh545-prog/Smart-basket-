@@ -46,7 +46,12 @@ import {
   normalizeOrderStatus,
   normalizeSellerStatus,
 } from '../types';
-import { IndianPincodeField, PhoneOtpField } from './IndianVerificationFields';
+import {
+  EmailVerificationField,
+  IndianMobileField,
+  IndianPincodeField,
+  MobileAvailabilityState,
+} from './IndianVerificationFields';
 import {
   PincodeLookupResult,
   isValidIndianMobile,
@@ -163,7 +168,12 @@ export const SellerView: React.FC<Props> = ({
   const [storeName, setStoreName] = useState('');
   const [ownerName, setOwnerName] = useState('');
   const [sellerPhone, setSellerPhone] = useState('');
-  const [verifiedSellerPhone, setVerifiedSellerPhone] = useState<string | null>(null);
+  const [sellerMobileStatus, setSellerMobileStatus] = useState<MobileAvailabilityState>({
+    validFormat: false,
+    checking: false,
+    available: false,
+  });
+  const [verifiedSellerEmail, setVerifiedSellerEmail] = useState<string | null>(null);
   const [pickupAddress, setPickupAddress] = useState('');
   const [pickupPincode, setPickupPincode] = useState('');
   const [sellerPostOffice, setSellerPostOffice] = useState('');
@@ -197,7 +207,15 @@ export const SellerView: React.FC<Props> = ({
     setLoadingProfile(true);
     setOwnerName(currentUser.name || '');
     setSellerPhone((currentUser.phone || '').replace(/\D/g, '').slice(-10));
-    setVerifiedSellerPhone(null);
+    const currentEmailLower = (currentUser.email || '').trim().toLowerCase();
+    if (
+      auth.currentUser?.email?.trim().toLowerCase() === currentEmailLower &&
+      auth.currentUser.emailVerified
+    ) {
+      setVerifiedSellerEmail(currentEmailLower);
+    } else {
+      setVerifiedSellerEmail(null);
+    }
     setPickupAddress(currentUser.address || '');
     const pinFromAddr = (currentUser.address || '').match(/\b\d{6}\b/)?.[0] || '';
     setPickupPincode(pinFromAddr);
@@ -211,8 +229,8 @@ export const SellerView: React.FC<Props> = ({
         setOwnerName(found.ownerName);
         const existingDigits = (found.phone || '').replace(/\D/g, '').slice(-10);
         setSellerPhone(existingDigits);
-        if (isValidIndianMobile(existingDigits)) {
-          setVerifiedSellerPhone(existingDigits);
+        if (found.email) {
+          setVerifiedSellerEmail(found.email.trim().toLowerCase());
         }
         setPickupAddress(found.pickupAddress);
         const resolvedPin =
@@ -449,16 +467,23 @@ export const SellerView: React.FC<Props> = ({
   };
 
   const cleanSellerPhoneDigits = sellerPhone.replace(/\D/g, '').slice(0, 10);
-  const isSellerPhoneOtpVerified = Boolean(
-    verifiedSellerPhone &&
-      verifiedSellerPhone === cleanSellerPhoneDigits &&
-      isValidIndianMobile(cleanSellerPhoneDigits)
+  const cleanSellerEmail = (currentUser?.email || '').trim().toLowerCase();
+  const isSellerEmailVerified = Boolean(
+    verifiedSellerEmail &&
+      verifiedSellerEmail.toLowerCase() === cleanSellerEmail &&
+      cleanSellerEmail.includes('@')
+  );
+  const isSellerMobileAvailable = Boolean(
+    isValidIndianMobile(cleanSellerPhoneDigits) &&
+      !sellerMobileStatus.checking &&
+      sellerMobileStatus.available
   );
   const isSellerPincodeVerified = Boolean(sellerPincodeResult?.valid);
   const canSubmitSellerForm =
     storeName.trim().length >= 2 &&
     ownerName.trim().length >= 2 &&
-    isSellerPhoneOtpVerified &&
+    isSellerEmailVerified &&
+    isSellerMobileAvailable &&
     pickupAddress.trim().length >= 5 &&
     isSellerPincodeVerified &&
     payoutAccount.trim().length >= 3;
@@ -471,12 +496,18 @@ export const SellerView: React.FC<Props> = ({
     const cleanPhone = sellerPhone.replace(/\D/g, '').slice(0, 10);
     const cleanPin = pickupPincode.replace(/\D/g, '').slice(0, 6);
 
+    if (!isSellerEmailVerified) {
+      setRegError('Please verify your Email Address via Firebase verification link before submitting.');
+      return;
+    }
     if (!isValidIndianMobile(cleanPhone)) {
       setRegError('Enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.');
       return;
     }
-    if (verifiedSellerPhone !== cleanPhone) {
-      setRegError('Please verify your Mobile Number via SMS OTP before submitting.');
+    if (!isSellerMobileAvailable) {
+      setRegError(
+        sellerMobileStatus.error || 'This mobile number is already registered or still being checked.'
+      );
       return;
     }
     if (!isValidIndianPincodeFormat(cleanPin) || !sellerPincodeResult?.valid) {
@@ -988,38 +1019,38 @@ export const SellerView: React.FC<Props> = ({
                 />
               </div>
 
-              <div className="grid sm:grid-cols-2 gap-3.5">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">
-                    Owner Full Name <span className="text-rose-500">*</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={ownerName}
-                    onChange={(e) => setOwnerName(e.target.value)}
-                    required
-                    placeholder="Full legal name"
-                    className="w-full h-11 px-3.5 rounded-lg bg-slate-50 border border-slate-300 text-sm focus:bg-white focus:border-[#2874F0] focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-700 mb-1">Verified Account Email</label>
-                  <input
-                    type="email"
-                    value={currentUser.email}
-                    readOnly
-                    className="w-full h-11 px-3.5 rounded-lg bg-slate-100 border border-slate-200 text-sm text-slate-600 cursor-not-allowed"
-                  />
-                </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Owner Full Name <span className="text-rose-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={ownerName}
+                  onChange={(e) => setOwnerName(e.target.value)}
+                  required
+                  placeholder="Full legal name"
+                  className="w-full h-11 px-3.5 rounded-lg bg-slate-50 border border-slate-300 text-sm focus:bg-white focus:border-[#2874F0] focus:outline-none"
+                />
               </div>
 
-              {/* Mandatory Firebase Phone SMS OTP Verification */}
-              <PhoneOtpField
+              {/* Mandatory Firebase Email Verification (APK-Compatible, Zero reCAPTCHA) */}
+              <EmailVerificationField
+                label="Account Email Address"
+                email={currentUser.email}
+                onEmailChange={() => {}}
+                readOnlyEmail
+                verifiedEmail={verifiedSellerEmail}
+                onVerifiedChange={setVerifiedSellerEmail}
+              />
+
+              {/* Strict Indian Mobile Format + Live Firestore Duplicate Check */}
+              <IndianMobileField
                 label="Mobile Number"
                 phone={sellerPhone}
                 onPhoneChange={setSellerPhone}
-                verifiedPhone={verifiedSellerPhone}
-                onVerifiedChange={setVerifiedSellerPhone}
+                onAvailabilityChange={setSellerMobileStatus}
+                excludeSellerEmail={currentUser.email}
+                excludeSellerUid={currentUser.uid}
               />
 
               {/* Strict India Post 6-Digit Pickup Pincode Lookup */}
@@ -1076,13 +1107,21 @@ export const SellerView: React.FC<Props> = ({
 
               {/* Mandatory Verification Readiness Status */}
               <div className="rounded-xl bg-slate-50 border border-slate-200 p-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] font-semibold">
-                <span className={isSellerPhoneOtpVerified ? 'text-emerald-700' : 'text-slate-500'}>
+                <span className={isSellerEmailVerified ? 'text-emerald-700' : 'text-slate-500'}>
                   <i
                     className={`fa-solid ${
-                      isSellerPhoneOtpVerified ? 'fa-circle-check text-emerald-600' : 'fa-circle text-slate-300'
+                      isSellerEmailVerified ? 'fa-circle-check text-emerald-600' : 'fa-circle text-slate-300'
                     } mr-1.5`}
                   ></i>
-                  Mobile SMS OTP Verified
+                  Email Verified
+                </span>
+                <span className={isSellerMobileAvailable ? 'text-emerald-700' : 'text-slate-500'}>
+                  <i
+                    className={`fa-solid ${
+                      isSellerMobileAvailable ? 'fa-circle-check text-emerald-600' : 'fa-circle text-slate-300'
+                    } mr-1.5`}
+                  ></i>
+                  Mobile Format &amp; Unique
                 </span>
                 <span className={isSellerPincodeVerified ? 'text-emerald-700' : 'text-slate-500'}>
                   <i
@@ -1967,21 +2006,21 @@ export const SellerView: React.FC<Props> = ({
                   className="w-full h-11 px-3.5 rounded-xl bg-slate-50 border border-slate-200 text-sm"
                 />
               </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">Seller Email</label>
-                <input
-                  type="email"
-                  value={sellerProfile.email}
-                  readOnly
-                  className="w-full h-11 px-3.5 rounded-xl bg-slate-100 border border-slate-200 text-sm text-slate-500 cursor-not-allowed"
-                />
-              </div>
-              <PhoneOtpField
+              <EmailVerificationField
+                label="Seller Email Address"
+                email={sellerProfile.email}
+                onEmailChange={() => {}}
+                readOnlyEmail
+                verifiedEmail={verifiedSellerEmail}
+                onVerifiedChange={setVerifiedSellerEmail}
+              />
+              <IndianMobileField
                 label="Mobile Number"
                 phone={sellerPhone}
                 onPhoneChange={setSellerPhone}
-                verifiedPhone={verifiedSellerPhone}
-                onVerifiedChange={setVerifiedSellerPhone}
+                onAvailabilityChange={setSellerMobileStatus}
+                excludeSellerEmail={sellerProfile.email}
+                excludeSellerUid={sellerProfile.uid || sellerProfile.id}
               />
               <IndianPincodeField
                 label="Pickup Pincode (India Post Verified)"

@@ -14,6 +14,7 @@ import {
 } from 'firebase/auth';
 import { AdminView } from './components/AdminView';
 import { CategoriesView } from './components/CategoriesView';
+import { FirstLaunchAuthScreen } from './components/FirstLaunchAuthScreen';
 import { RiderView } from './components/RiderView';
 import { SellerView } from './components/SellerView';
 import { auth, getFirebaseAuthErrorMessage, googleProvider } from './firebase';
@@ -70,6 +71,9 @@ type LegalPolicyKey = 'privacy' | 'terms' | 'refund' | 'contact';
 const ADMIN_EMAIL = 'sabreensheikh545@gmail.com';
 const ADMIN_SECRET_PIN = '2026';
 export const RAZORPAY_KEY_ID = "rzp_live_U1t08rrhb6TEXG";
+const ONBOARDED_STORAGE_KEY = 'smart_basket_onboarded';
+const DEFAULT_DELIVERY_PINCODE = '110039';
+const DEFAULT_DELIVERY_LABEL = 'Bawana, Delhi - 110039';
 
 type UserPage = 'home' | 'categories' | 'play' | 'shop' | 'detail' | 'cart' | 'checkout' | 'orders' | 'profile' | 'login';
 
@@ -159,8 +163,18 @@ export default function App() {
   const [wishlistIds, setWishlistIds] = useState<number[]>(() => getWishlistIdsLocal());
   const [deliveryPincode, setDeliveryPincode] = useState<string>(() => {
     const saved = getSavedAddressLocal();
-    return saved?.pincode || '560038';
+    return saved?.pincode || DEFAULT_DELIVERY_PINCODE;
   });
+  const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(ONBOARDED_STORAGE_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const [firebaseAuthResolved, setFirebaseAuthResolved] = useState<boolean>(() =>
+    Boolean(auth.currentUser || currentUser)
+  );
   const [pincodeDraft, setPincodeDraft] = useState('');
   const [editingPincode, setEditingPincode] = useState(false);
 
@@ -462,18 +476,40 @@ export default function App() {
         setAuthError(getFirebaseAuthErrorMessage(err));
       });
 
+    const markOnboarded = () => {
+      try {
+        localStorage.setItem(ONBOARDED_STORAGE_KEY, 'true');
+      } catch {
+        // ignore storage errors
+      }
+      setHasCompletedOnboarding(true);
+    };
+
+    const authFallbackTimer = window.setTimeout(() => {
+      if (active) setFirebaseAuthResolved(true);
+    }, 1200);
+
     const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
-      if (!active || isAuthActionInFlightRef.current) return;
+      if (!active) return;
+      if (isAuthActionInFlightRef.current) {
+        setFirebaseAuthResolved(true);
+        return;
+      }
       if (fbUser?.email) {
         const user = await syncSignedInUser(fbUser);
         if (active && user) {
           setCurrentUser(user);
+          markOnboarded();
         }
+      }
+      if (active) {
+        setFirebaseAuthResolved(true);
       }
     });
 
     return () => {
       active = false;
+      window.clearTimeout(authFallbackTimer);
       unsubscribe();
     };
   }, [refreshLocalSession]);
@@ -685,8 +721,10 @@ export default function App() {
     }
     if (checkoutAddress) return checkoutAddress;
     if (currentUser?.address) return currentUser.address;
-    if (deliveryPincode) return deliveryPincode;
-    return 'Select delivery location';
+    if (deliveryPincode) {
+      return deliveryPincode === DEFAULT_DELIVERY_PINCODE ? DEFAULT_DELIVERY_LABEL : deliveryPincode;
+    }
+    return DEFAULT_DELIVERY_LABEL;
   }, [savedAddress, checkoutAddress, currentUser, deliveryPincode]);
 
   const openAddressModal = useCallback(() => {
@@ -1075,7 +1113,17 @@ export default function App() {
     });
   };
 
+  const markOnboardingComplete = useCallback(() => {
+    try {
+      localStorage.setItem(ONBOARDED_STORAGE_KEY, 'true');
+    } catch {
+      // ignore storage errors
+    }
+    setHasCompletedOnboarding(true);
+  }, []);
+
   const completeCustomerLogin = (user: User) => {
+    markOnboardingComplete();
     refreshLocalSession();
     setCurrentUser(user);
     setAuthError('');
@@ -2136,6 +2184,39 @@ export default function App() {
             </div>
           )}
         </>
+      ) : !hasCompletedOnboarding && !currentUser && !currentRider ? (
+        !firebaseAuthResolved ? (
+          <div className="min-h-screen bg-white flex flex-col items-center justify-center gap-3 px-6">
+            <div className="w-12 h-12 rounded-2xl bg-[#2874F0] flex items-center justify-center shadow-xs">
+              <i className="fa-solid fa-basket-shopping text-xl text-white"></i>
+            </div>
+            <p className="text-sm font-bold text-slate-700">Smart Basket ⚡</p>
+          </div>
+        ) : (
+          <FirstLaunchAuthScreen
+            onLogin={() => {
+              markOnboardingComplete();
+              setAuthTab('login');
+              setAuthError('');
+              setPage('login');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            }}
+            onSignUp={() => {
+              markOnboardingComplete();
+              setAuthTab('signup');
+              setAuthError('');
+              setPage('login');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            }}
+            onSkip={() => {
+              markOnboardingComplete();
+              setPage('home');
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+            }}
+            onOpenTerms={() => setActiveLegalPolicy('terms')}
+            onOpenPrivacy={() => setActiveLegalPolicy('privacy')}
+          />
+        )
       ) : (
         <div className={page === 'categories' ? 'pb-14 md:pb-0' : page === 'cart' ? 'pb-36 md:pb-28' : page === 'detail' ? 'pb-20 md:pb-10' : 'pb-16 md:pb-10'}>
           {/* Flipkart Royal Blue Header (#2874F0) — hidden on Split-Screen All Categories & Flipkart-style Cart which render their own clean white sticky headers */}
@@ -3278,7 +3359,11 @@ export default function App() {
                     <p className="text-xs sm:text-sm text-slate-700 truncate">
                       <strong className="font-extrabold text-slate-900 mr-1.5">Deliver to:</strong>
                       <span>
-                        {displayAddressSummary || deliveryPincode || 'Tap to select delivery location'}
+                        {displayAddressSummary ||
+                          (deliveryPincode === DEFAULT_DELIVERY_PINCODE
+                            ? DEFAULT_DELIVERY_LABEL
+                            : deliveryPincode) ||
+                          DEFAULT_DELIVERY_LABEL}
                       </span>
                     </p>
                   </div>
