@@ -9,7 +9,6 @@ import fashionImg from '../assets/images/product_fashion_denim_1794941061353.jpg
 import homeApplianceImg from '../assets/images/product_home_appliance_1794941059747.jpg';
 import beautyImg from '../assets/images/product_beauty_skincare_1794941060127.jpg';
 import groceryImg from '../assets/images/product_grocery_pack_1794941061136.jpg';
-import bigSavingBannerImg from '../assets/images/banner_big_saving_1794941061121.jpg';
 import {
   CartEntry,
   Category,
@@ -17,18 +16,24 @@ import {
   DeliveryBoy,
   DeliverySettings,
   Order,
+  PayoutRequest,
   Product,
+  ProductQuestion,
   ProductReview,
+  ProductVariantGroup,
   PromoCode,
   RiderCashSettlement,
   RiderKycStatus,
   SavedAddress,
   SellerPayoutRecord,
   SellerProfile,
+  StoreBannerSettings,
+  SupportTicket,
   User,
   extractPincodeFromAddress,
   generateDeliveryOtp,
   isOnlinePaidOrder,
+  normalizeProductVariants,
   normalizeSellerStatus,
 } from '../types';
 import {
@@ -49,7 +54,6 @@ export const ASSETS = {
   beauty: beautyImg,
   grocery: groceryImg,
   hero: heroImg,
-  bigSavingBanner: bigSavingBannerImg,
 };
 
 export const IMAGE_CHOICES = [
@@ -76,11 +80,11 @@ interface AdminCreds {
 }
 
 const KEYS = {
-  seeded: 'qk_seeded_v3',
+  seeded: 'qk_seeded_live_v4',
   categories: 'qk_categories_v3',
-  products: 'qk_products_v3',
-  users: 'qk_users_v3',
-  orders: 'qk_orders_v3',
+  products: 'qk_products_live_v4',
+  users: 'qk_users_live_v4',
+  orders: 'qk_orders_live_v4',
   cart: 'qk_cart_v3',
   currentUser: 'qk_current_user_v3',
   adminCreds: 'qk_admin_creds_v3',
@@ -93,14 +97,20 @@ const KEYS = {
   savedAddress: 'qk_saved_address_v3',
   savedAddresses: 'qk_saved_addresses_v4',
   deliverySettings: 'qk_delivery_settings_v1',
+  storeBanner: 'qk_store_banner_v1',
   promoCodes: 'qk_promo_codes_v1',
   reviews: 'qk_reviews_v1',
   recentlyViewed: 'qk_recently_viewed_v1',
+  payoutRequests: 'qk_payout_requests_v1',
+  recentSearches: 'qk_recent_searches_v1',
+  savedForLater: 'qk_saved_for_later_v1',
+  productQuestions: 'qk_product_questions_v1',
+  supportTickets: 'qk_support_tickets_v1',
 };
 
 export function resolveAssetImage(imageValue?: string): string {
   const val = (imageValue || '').trim();
-  if (!val) return smartphoneImg;
+  if (!val) return '';
   const knownAssets = [
     { key: 'product_smartphone_5g_1794941059550', url: smartphoneImg },
     { key: 'product_fashion_denim_1794941061353', url: fashionImg },
@@ -113,7 +123,6 @@ export function resolveAssetImage(imageValue?: string): string {
     { key: 'product_beauty_skincare_1794941060127', url: beautyImg },
     { key: 'product_grocery_pack_1794941061136', url: groceryImg },
     { key: 'hero_quick_kart_1794891801002', url: heroImg },
-    { key: 'banner_big_saving_1794941061121', url: bigSavingBannerImg },
   ];
   const matched = knownAssets.find((item) => val.includes(item.key));
   return matched ? matched.url : val;
@@ -126,226 +135,6 @@ export const DEFAULT_CATEGORIES: Category[] = [
   { id: 4, name: 'Home', image: homeApplianceImg },
   { id: 5, name: 'Beauty', image: beautyImg },
   { id: 6, name: 'Grocery', image: groceryImg },
-];
-
-export const DEFAULT_PRODUCTS: Product[] = [
-  {
-    id: 1,
-    cat_id: 1,
-    name: 'Redmi Note 13 Pro 5G (Midnight Blue, 128 GB)',
-    description: '200MP OIS triple camera, 1.5K 120Hz AMOLED display, Snapdragon 7s Gen 2 processor with 67W turbo charging.',
-    price: 21999,
-    mrp: 28999,
-    rating: 0,
-    reviews: 0,
-    stock: 25,
-    image: smartphoneImg,
-    created_at: '2026-11-10T10:00:00Z',
-  },
-  {
-    id: 2,
-    cat_id: 1,
-    name: 'Samsung Galaxy M35 5G (Thunder Blue, 8GB RAM)',
-    description: '6000mAh massive battery, 120Hz Super AMOLED display, 50MP no-shake camera, and Gorilla Glass Victus+ protection.',
-    price: 16499,
-    mrp: 24499,
-    rating: 0,
-    reviews: 0,
-    stock: 18,
-    image: smartphoneImg,
-    created_at: '2026-11-11T10:00:00Z',
-  },
-  {
-    id: 3,
-    cat_id: 2,
-    name: 'U.S. Polo Assn. Indigo Denim Jacket & Cotton Shirt',
-    description: 'Pure breathable combed cotton casual shirt paired with a tailored classic indigo washed denim jacket.',
-    price: 1899,
-    mrp: 3999,
-    rating: 0,
-    reviews: 0,
-    stock: 30,
-    image: fashionImg,
-    created_at: '2026-11-12T10:00:00Z',
-  },
-  {
-    id: 4,
-    cat_id: 2,
-    name: 'Campus Stride Air-Knit Running Shoes (Men)',
-    description: 'Lightweight engineered mesh upper with dual-density cushioned EVA sole for everyday running and gym sessions.',
-    price: 1299,
-    mrp: 2599,
-    rating: 0,
-    reviews: 0,
-    stock: 35,
-    image: sneakersImg,
-    created_at: '2026-11-12T14:00:00Z',
-  },
-  {
-    id: 5,
-    cat_id: 2,
-    name: 'Wildcraft 25L Waterproof Commuter Laptop Backpack',
-    description: 'Heavy-duty water-repellent canvas daypack with 16-inch padded laptop compartment and ergonomic airflow straps.',
-    price: 1199,
-    mrp: 2499,
-    rating: 0,
-    reviews: 0,
-    stock: 22,
-    image: backpackImg,
-    created_at: '2026-11-13T10:00:00Z',
-  },
-  {
-    id: 6,
-    cat_id: 3,
-    name: 'boAt Airdopes 141 ANC Wireless TWS Earbuds',
-    description: 'Active Noise Cancellation up to 32dB, 42-hour playback, ENx quad-mic call clarity, and ASAP fast charging.',
-    price: 1399,
-    mrp: 4490,
-    rating: 0,
-    reviews: 0,
-    stock: 40,
-    image: earbudsImg,
-    created_at: '2026-11-13T15:00:00Z',
-  },
-  {
-    id: 7,
-    cat_id: 3,
-    name: 'Noise ColorFit Pro 5 Titanium AMOLED Smartwatch',
-    description: '1.85-inch vivid AMOLED display, Bluetooth calling, SpO2 & heart rate monitor, and 7-day battery endurance.',
-    price: 3499,
-    mrp: 6999,
-    rating: 0,
-    reviews: 0,
-    stock: 19,
-    image: smartwatchImg,
-    created_at: '2026-11-14T10:00:00Z',
-  },
-  {
-    id: 8,
-    cat_id: 3,
-    name: 'Sony WH-CH520 Wireless Studio Headphones',
-    description: '50-hour battery life, multipoint Bluetooth connection, DSEE audio upscaling, and ultra-soft earpads.',
-    price: 4490,
-    mrp: 5990,
-    rating: 0,
-    reviews: 0,
-    stock: 14,
-    image: heroImg,
-    created_at: '2026-11-14T16:00:00Z',
-  },
-  {
-    id: 9,
-    cat_id: 4,
-    name: 'Prestige Matte Black 1.5L Stainless Electric Kettle',
-    description: '1500W rapid boil stainless steel electric kettle with auto shut-off, 360-degree swivel base, and cool-touch handle.',
-    price: 949,
-    mrp: 1795,
-    rating: 0,
-    reviews: 0,
-    stock: 28,
-    image: homeApplianceImg,
-    created_at: '2026-11-15T09:00:00Z',
-  },
-  {
-    id: 10,
-    cat_id: 4,
-    name: 'Milton Thermosteel 750ml Vacuum Insulated Flask',
-    description: 'Double-walled 304 stainless steel vacuum flask keeps water chilled for 24 hours and tea/coffee piping hot.',
-    price: 799,
-    mrp: 1250,
-    rating: 0,
-    reviews: 0,
-    stock: 45,
-    image: flaskImg,
-    created_at: '2026-11-15T12:00:00Z',
-  },
-  {
-    id: 11,
-    cat_id: 5,
-    name: 'Minimalist 10% Vitamin C Serum & Ceramide Cream Combo',
-    description: 'Dermatologist-tested daily glow brightening serum with 10% ethyl ascorbic acid and barrier-repair moisturizer.',
-    price: 649,
-    mrp: 999,
-    rating: 0,
-    reviews: 0,
-    stock: 32,
-    image: beautyImg,
-    created_at: '2026-11-16T08:30:00Z',
-  },
-  {
-    id: 12,
-    cat_id: 6,
-    name: 'Happilo California Almonds, Raw Honey & Green Tea Pack',
-    description: 'Premium crunchy California almonds (250g), wild forest raw honey (500g), and organic Darjeeling green tea.',
-    price: 749,
-    mrp: 1199,
-    rating: 0,
-    reviews: 0,
-    stock: 50,
-    image: groceryImg,
-    created_at: '2026-11-16T15:45:00Z',
-  },
-];
-
-const DEFAULT_USERS: StoredUser[] = [
-  {
-    id: 1,
-    name: 'Demo Customer',
-    phone: '9876543210',
-    email: 'user@quickkart.com',
-    password: '123456',
-    address: '402 Indiranagar 100ft Road, Bengaluru, Karnataka 560038',
-    status: 'active',
-    created_at: '2026-11-01T09:00:00Z',
-  },
-];
-
-const DEFAULT_ORDERS: Order[] = [
-  {
-    id: 1001,
-    user_id: 1,
-    name: 'Demo Customer',
-    phone: '9876543210',
-    address: '402 Indiranagar 100ft Road, Bengaluru, Karnataka 560038',
-    total_amount: 1399,
-    status: 'Shipped',
-    courierName: 'Delhivery',
-    trackingId: 'DLV948271630IN',
-    trackingNote: 'Dispatched from Bawana Warehouse, Delhi',
-    created_at: '2026-11-15T14:20:00Z',
-    items: [
-      {
-        id: 1,
-        order_id: 1001,
-        product_id: 6,
-        product_name: 'boAt Airdopes 141 ANC Wireless TWS Earbuds',
-        product_image: earbudsImg,
-        quantity: 1,
-        price: 1399,
-      },
-    ],
-  },
-  {
-    id: 1000,
-    user_id: 1,
-    name: 'Demo Customer',
-    phone: '9876543210',
-    address: '402 Indiranagar 100ft Road, Bengaluru, Karnataka 560038',
-    total_amount: 799,
-    status: 'Delivered',
-    created_at: '2026-11-08T11:10:00Z',
-    items: [
-      {
-        id: 2,
-        order_id: 1000,
-        product_id: 10,
-        product_name: 'Milton Thermosteel 750ml Vacuum Insulated Flask',
-        product_image: flaskImg,
-        quantity: 1,
-        price: 799,
-      },
-    ],
-  },
 ];
 
 const DEFAULT_ADMIN: AdminCreds = {
@@ -374,12 +163,18 @@ function writeJSON<T>(key: string, value: T): void {
 export function ensureSeeded(): void {
   try {
     if (!window.localStorage.getItem(KEYS.seeded)) {
-      writeJSON(KEYS.categories, DEFAULT_CATEGORIES);
-      writeJSON(KEYS.products, DEFAULT_PRODUCTS);
-      writeJSON(KEYS.users, DEFAULT_USERS);
-      writeJSON(KEYS.orders, DEFAULT_ORDERS);
-      writeJSON(KEYS.cart, []);
-      writeJSON(KEYS.adminCreds, DEFAULT_ADMIN);
+      if (!window.localStorage.getItem(KEYS.categories)) {
+        writeJSON(KEYS.categories, DEFAULT_CATEGORIES);
+      }
+      writeJSON(KEYS.products, []);
+      writeJSON(KEYS.users, []);
+      writeJSON(KEYS.orders, []);
+      if (!window.localStorage.getItem(KEYS.cart)) {
+        writeJSON(KEYS.cart, []);
+      }
+      if (!window.localStorage.getItem(KEYS.adminCreds)) {
+        writeJSON(KEYS.adminCreds, DEFAULT_ADMIN);
+      }
       window.localStorage.setItem(KEYS.seeded, '1');
     } else if (!window.localStorage.getItem(KEYS.adminCreds)) {
       writeJSON(KEYS.adminCreds, DEFAULT_ADMIN);
@@ -392,9 +187,9 @@ export function ensureSeeded(): void {
 export function getBootstrapData() {
   ensureSeeded();
   const categories = readJSON<Category[]>(KEYS.categories, DEFAULT_CATEGORIES);
-  const products = readJSON<Product[]>(KEYS.products, DEFAULT_PRODUCTS);
-  const users = readJSON<StoredUser[]>(KEYS.users, DEFAULT_USERS).map(({ password: _p, ...u }) => u);
-  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  const products = readJSON<Product[]>(KEYS.products, []);
+  const users = readJSON<StoredUser[]>(KEYS.users, []).map(({ password: _p, ...u }) => u);
+  const orders = readJSON<Order[]>(KEYS.orders, []);
   const adminCreds = readJSON<AdminCreds>(KEYS.adminCreds, DEFAULT_ADMIN);
   const cart = readJSON<CartEntry[]>(KEYS.cart, []);
   const currentUser = readJSON<User | null>(KEYS.currentUser, null);
@@ -429,7 +224,7 @@ export function cacheOrdersLocal(orders: Order[]): void {
 }
 
 export function cacheUsersLocal(users: User[]): void {
-  const existing = readJSON<StoredUser[]>(KEYS.users, DEFAULT_USERS);
+  const existing = readJSON<StoredUser[]>(KEYS.users, []);
   const mapped: StoredUser[] = users.map((u) => {
     const prev = existing.find((e) => (u.uid && e.uid === u.uid) || e.email.toLowerCase() === u.email.toLowerCase());
     return { ...u, password: prev?.password || '' };
@@ -449,7 +244,7 @@ export function loginUserLocal(identifier: string, password: string): { success:
   ensureSeeded();
   const clean = identifier.trim().toLowerCase();
   const digits = identifier.trim();
-  const users = readJSON<StoredUser[]>(KEYS.users, DEFAULT_USERS);
+  const users = readJSON<StoredUser[]>(KEYS.users, []);
   const found = users.find(
     (u) =>
       (u.email && u.email.toLowerCase() === clean) ||
@@ -487,7 +282,7 @@ export function syncFirebaseCustomerLocal(payload: {
   const cleanPhone = payload.phone ? payload.phone.replace(/\D/g, '').slice(-10) : '';
   const cleanAddress = payload.address?.trim() || '';
 
-  const users = readJSON<StoredUser[]>(KEYS.users, DEFAULT_USERS);
+  const users = readJSON<StoredUser[]>(KEYS.users, []);
   const existingIdx = users.findIndex(
     (u) =>
       (payload.uid && u.uid === payload.uid) ||
@@ -559,7 +354,7 @@ export function signupUserLocal(payload: {
   const email = isEmail ? contact.toLowerCase() : '';
   const phone = isEmail ? '' : contact;
 
-  const users = readJSON<StoredUser[]>(KEYS.users, DEFAULT_USERS);
+  const users = readJSON<StoredUser[]>(KEYS.users, []);
   const duplicate = users.some(
     (u) =>
       (email && u.email.toLowerCase() === email) ||
@@ -593,7 +388,7 @@ export function updateProfileLocal(payload: {
   email: string;
   address: string;
 }): { success: boolean; message: string; user?: User } {
-  const users = readJSON<StoredUser[]>(KEYS.users, DEFAULT_USERS);
+  const users = readJSON<StoredUser[]>(KEYS.users, []);
   const idx = users.findIndex((u) => u.id === payload.id);
   if (idx === -1) return { success: false, message: 'User not found.' };
   users[idx] = {
@@ -614,7 +409,7 @@ export function changePasswordLocal(
   currentPassword: string,
   newPassword: string
 ): { success: boolean; message: string } {
-  const users = readJSON<StoredUser[]>(KEYS.users, DEFAULT_USERS);
+  const users = readJSON<StoredUser[]>(KEYS.users, []);
   const idx = users.findIndex((u) => u.id === id);
   if (idx === -1) return { success: false, message: 'User not found.' };
   if (users[idx].password !== currentPassword) {
@@ -639,9 +434,9 @@ export function placeOrderLocal(payload: {
     return { success: false, message: 'Please provide complete delivery details and cart items.' };
   }
 
-  const products = readJSON<Product[]>(KEYS.products, DEFAULT_PRODUCTS);
-  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
-  const users = readJSON<StoredUser[]>(KEYS.users, DEFAULT_USERS);
+  const products = readJSON<Product[]>(KEYS.products, []);
+  const orders = readJSON<Order[]>(KEYS.orders, []);
+  const users = readJSON<StoredUser[]>(KEYS.users, []);
 
   const nextOrderId = orders.reduce((max, o) => Math.max(max, o.id), 1001) + 1;
   let total = 0;
@@ -712,7 +507,7 @@ export function cancelOrderLocal(
   userId: number,
   cancelReason?: string
 ): { success: boolean; message: string } {
-  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  const orders = readJSON<Order[]>(KEYS.orders, []);
   const ord = orders.find((o) => o.id === orderId && o.user_id === userId);
   if (
     !ord ||
@@ -760,7 +555,7 @@ export function saveCategoryLocal(payload: { id?: number; name: string; image: s
 
 export function deleteCategoryLocal(id: number): void {
   const categories = readJSON<Category[]>(KEYS.categories, DEFAULT_CATEGORIES).filter((c) => c.id !== id);
-  const products = readJSON<Product[]>(KEYS.products, DEFAULT_PRODUCTS).filter((p) => p.cat_id !== id);
+  const products = readJSON<Product[]>(KEYS.products, []).filter((p) => p.cat_id !== id);
   writeJSON(KEYS.categories, categories);
   writeJSON(KEYS.products, products);
 }
@@ -775,6 +570,9 @@ export function saveProductLocal(payload: {
   rating?: number;
   stock: number;
   image: string;
+  images?: string[];
+  variants?: ProductVariantGroup[];
+  highlights?: string[];
   sellerId?: string;
   sellerEmail?: string;
   sellerName?: string;
@@ -782,8 +580,21 @@ export function saveProductLocal(payload: {
   if (!payload.name.trim() || payload.price <= 0) {
     return { success: false, message: 'Valid product name and price required.' };
   }
-  const products = readJSON<Product[]>(KEYS.products, DEFAULT_PRODUCTS);
-  const mrpValue = payload.mrp && payload.mrp > payload.price ? payload.mrp : Math.round((payload.price * 1.35) / 10) * 10 - 1;
+  const products = readJSON<Product[]>(KEYS.products, []);
+  const mrpValue = payload.mrp && payload.mrp > payload.price ? payload.mrp : undefined;
+  const cleanGallery = Array.from(
+    new Set(
+      [payload.image, ...(Array.isArray(payload.images) ? payload.images : [])]
+        .map((s) => (s || '').trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 4);
+  const cleanVariants =
+    payload.variants !== undefined ? normalizeProductVariants(payload.variants) : undefined;
+  const cleanHighlights = Array.isArray(payload.highlights)
+    ? payload.highlights.map((h) => h.trim()).filter(Boolean)
+    : undefined;
+
   if (payload.id && payload.id > 0) {
     const idx = products.findIndex((p) => p.id === payload.id);
     if (idx !== -1) {
@@ -797,6 +608,9 @@ export function saveProductLocal(payload: {
         rating: payload.rating ?? products[idx].rating ?? 0,
         stock: payload.stock,
         image: payload.image || products[idx].image,
+        images: cleanGallery.length > 0 ? cleanGallery : products[idx].images,
+        variants: cleanVariants !== undefined ? cleanVariants : products[idx].variants,
+        highlights: cleanHighlights !== undefined ? cleanHighlights : products[idx].highlights,
         sellerId: payload.sellerId ?? products[idx].sellerId,
         sellerEmail: payload.sellerEmail ?? products[idx].sellerEmail,
         sellerName: payload.sellerName ?? products[idx].sellerName,
@@ -807,6 +621,7 @@ export function saveProductLocal(payload: {
     return { success: true, message: 'Product updated.' };
   }
   const nextId = products.reduce((max, p) => Math.max(max, p.id), 0) + 1;
+  const primaryImage = payload.image || earbudsImg;
   const newProd: Product = {
     id: nextId,
     cat_id: payload.cat_id,
@@ -817,7 +632,10 @@ export function saveProductLocal(payload: {
     rating: payload.rating ?? 0,
     reviews: 0,
     stock: payload.stock,
-    image: payload.image || earbudsImg,
+    image: primaryImage,
+    images: cleanGallery.length > 0 ? cleanGallery : [primaryImage],
+    variants: cleanVariants && cleanVariants.length > 0 ? cleanVariants : undefined,
+    highlights: cleanHighlights && cleanHighlights.length > 0 ? cleanHighlights : undefined,
     created_at: new Date().toISOString(),
     sellerId: payload.sellerId,
     sellerEmail: payload.sellerEmail?.trim().toLowerCase(),
@@ -828,14 +646,14 @@ export function saveProductLocal(payload: {
 }
 
 export function deleteProductLocal(id: number): void {
-  const products = readJSON<Product[]>(KEYS.products, DEFAULT_PRODUCTS).filter((p) => p.id !== id);
+  const products = readJSON<Product[]>(KEYS.products, []).filter((p) => p.id !== id);
   writeJSON(KEYS.products, products);
 }
 
 export function deductProductStockLocal(
   items: { product_id: number; quantity: number }[]
 ): Product[] {
-  const products = readJSON<Product[]>(KEYS.products, DEFAULT_PRODUCTS);
+  const products = readJSON<Product[]>(KEYS.products, []);
   const qtyById = new Map<number, number>();
   items.forEach((it) => {
     const qty = Math.max(1, Math.floor(Number(it.quantity) || 1));
@@ -856,7 +674,7 @@ export function deductProductStockLocal(
 export function restoreProductStockLocal(
   items: { product_id: number; quantity: number }[]
 ): Product[] {
-  const products = readJSON<Product[]>(KEYS.products, DEFAULT_PRODUCTS);
+  const products = readJSON<Product[]>(KEYS.products, []);
   const qtyById = new Map<number, number>();
   items.forEach((it) => {
     const qty = Math.max(1, Math.floor(Number(it.quantity) || 1));
@@ -879,7 +697,7 @@ export function updateOrderStatusLocal(
   status: Order['status'],
   extra?: { cancelReason?: string }
 ): { success: boolean; message: string } {
-  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  const orders = readJSON<Order[]>(KEYS.orders, []);
   const ord = orders.find((o) => o.id === orderId);
   if (!ord) return { success: false, message: 'Order not found.' };
   const nowIso = new Date().toISOString();
@@ -908,7 +726,7 @@ export function updateOrderTrackingLocal(
     trackingNote?: string;
   }
 ): { success: boolean; message: string; order?: Order } {
-  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  const orders = readJSON<Order[]>(KEYS.orders, []);
   const ord = orders.find((o) => o.id === orderId);
   if (!ord) return { success: false, message: 'Order not found locally.' };
   const nowIso = new Date().toISOString();
@@ -937,7 +755,7 @@ export function requestOrderReturnLocal(
     returnRequestId?: string;
   }
 ): { success: boolean; message: string; order?: Order } {
-  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  const orders = readJSON<Order[]>(KEYS.orders, []);
   const ord = orders.find((o) => o.id === orderId);
   if (!ord) return { success: false, message: 'Order not found locally.' };
   ord.status = 'Return Requested';
@@ -954,8 +772,12 @@ export function requestOrderReturnLocal(
   };
 }
 
+export function getStoredUsersLocal(): User[] {
+  return readJSON<StoredUser[]>(KEYS.users, []).map(({ password: _p, ...rest }) => rest);
+}
+
 export function toggleUserBlockLocal(userId: number, status: 'active' | 'blocked'): void {
-  const users = readJSON<StoredUser[]>(KEYS.users, DEFAULT_USERS);
+  const users = readJSON<StoredUser[]>(KEYS.users, []);
   const user = users.find((u) => u.id === userId);
   if (user) {
     user.status = status;
@@ -963,8 +785,56 @@ export function toggleUserBlockLocal(userId: number, status: 'active' | 'blocked
   }
 }
 
+export function toggleUserBlockByIdentityLocal(
+  target: Pick<User, 'id' | 'uid' | 'docId' | 'email' | 'name' | 'phone' | 'address' | 'created_at'>,
+  status: 'active' | 'blocked'
+): void {
+  const users = readJSON<StoredUser[]>(KEYS.users, []);
+  const emailLower = (target.email || '').trim().toLowerCase();
+  const idx = users.findIndex(
+    (u) =>
+      (target.docId && (u.docId === target.docId || u.uid === target.docId)) ||
+      (target.uid && (u.uid === target.uid || u.docId === target.uid)) ||
+      (emailLower && (u.email || '').trim().toLowerCase() === emailLower) ||
+      (target.id && u.id === target.id)
+  );
+  if (idx !== -1) {
+    users[idx] = { ...users[idx], status };
+  } else {
+    users.unshift({
+      ...target,
+      status,
+      password: '',
+    });
+  }
+  writeJSON(KEYS.users, users);
+
+  const cur = readJSON<User | null>(KEYS.currentUser, null);
+  if (cur) {
+    const matchesCurrent =
+      (target.uid && cur.uid === target.uid) ||
+      (target.docId && (cur.docId === target.docId || cur.uid === target.docId)) ||
+      (emailLower && (cur.email || '').trim().toLowerCase() === emailLower) ||
+      (target.id && cur.id === target.id);
+    if (matchesCurrent) {
+      writeJSON(KEYS.currentUser, { ...cur, status });
+    }
+  }
+}
+
+export function isUserBlockedLocal(uid?: string, email?: string): boolean {
+  const users = readJSON<StoredUser[]>(KEYS.users, []);
+  const cleanEmail = (email || '').trim().toLowerCase();
+  const matched = users.find(
+    (u) =>
+      (uid && (u.uid === uid || u.docId === uid || String(u.id) === uid)) ||
+      (cleanEmail && (u.email || '').trim().toLowerCase() === cleanEmail)
+  );
+  return matched?.status === 'blocked';
+}
+
 export function deleteUserLocal(userId: number): void {
-  const users = readJSON<StoredUser[]>(KEYS.users, DEFAULT_USERS).filter((u) => u.id !== userId);
+  const users = readJSON<StoredUser[]>(KEYS.users, []).filter((u) => u.id !== userId);
   writeJSON(KEYS.users, users);
 }
 
@@ -1163,6 +1033,33 @@ export function saveDeliverySettingsLocal(settings: DeliverySettings): void {
   writeJSON(KEYS.deliverySettings, settings);
 }
 
+export function getStoreBannerLocal(): StoreBannerSettings | null {
+  const stored = readJSON<Partial<StoreBannerSettings> | null>(KEYS.storeBanner, null);
+  if (!stored) return null;
+  const title = typeof stored.title === 'string' ? stored.title.trim() : '';
+  const subtitle = typeof stored.subtitle === 'string' ? stored.subtitle.trim() : '';
+  const imageUrl = typeof stored.imageUrl === 'string' ? stored.imageUrl.trim() : '';
+  if (!title && !imageUrl) return null;
+  return {
+    title,
+    subtitle: subtitle || undefined,
+    imageUrl,
+    updatedAt: typeof stored.updatedAt === 'string' ? stored.updatedAt : undefined,
+  };
+}
+
+export function saveStoreBannerLocal(banner: StoreBannerSettings | null): void {
+  if (!banner || (!banner.title.trim() && !banner.imageUrl.trim())) {
+    try {
+      window.localStorage.removeItem(KEYS.storeBanner);
+    } catch {
+      writeJSON(KEYS.storeBanner, null);
+    }
+    return;
+  }
+  writeJSON(KEYS.storeBanner, banner);
+}
+
 export function getPromoCodesLocal(): PromoCode[] {
   const stored = readJSON<PromoCode[] | null>(KEYS.promoCodes, null);
   if (!Array.isArray(stored)) return DEFAULT_PROMO_CODES;
@@ -1298,7 +1195,7 @@ export function saveSellerProfileLocal(payload: {
   setStoredCurrentSeller(sellerRecord);
 
   // Also mark matching user in local users & currentUser as seller
-  const users = readJSON<StoredUser[]>(KEYS.users, DEFAULT_USERS);
+  const users = readJSON<StoredUser[]>(KEYS.users, []);
   const uIdx = users.findIndex(
     (u) => (payload.uid && u.uid === payload.uid) || u.email.trim().toLowerCase() === cleanEmail
   );
@@ -1331,11 +1228,19 @@ export function saveSellerProfileLocal(payload: {
   };
 }
 
+export function getPayoutRequestsLocal(): PayoutRequest[] {
+  return readJSON<PayoutRequest[]>(KEYS.payoutRequests, []);
+}
+
+export function savePayoutRequestsLocal(list: PayoutRequest[]): void {
+  writeJSON(KEYS.payoutRequests, list);
+}
+
 export function requestSellerPayoutLocal(
   sellerIdentifier: string,
   amount: number,
   payoutAccount: string
-): { success: boolean; message: string; seller?: SellerProfile } {
+): { success: boolean; message: string; seller?: SellerProfile; payoutRequest?: PayoutRequest } {
   const cleanId = sellerIdentifier.trim().toLowerCase();
   const cleanAmount = Math.round(Number(amount || 0) * 100) / 100;
   const cleanAccount = payoutAccount.trim();
@@ -1360,10 +1265,11 @@ export function requestSellerPayoutLocal(
   }
 
   const nowIso = new Date().toISOString();
+  const requestId = `PO-${Date.now().toString(36).toUpperCase()}`;
   const existingHistory = Array.isArray(sellers[idx].payoutHistory) ? sellers[idx].payoutHistory! : [];
   const nextPending = Math.round((Number(sellers[idx].pendingPayoutAmount || 0) + cleanAmount) * 100) / 100;
   const record: SellerPayoutRecord = {
-    id: `po_${Date.now()}`,
+    id: requestId,
     amount: cleanAmount,
     payoutAccount: cleanAccount,
     status: 'requested',
@@ -1376,10 +1282,26 @@ export function requestSellerPayoutLocal(
     pendingPayoutAmount: nextPending,
     payoutStatus: 'requested',
     payoutRequestedAt: nowIso,
-    payoutHistory: [record, ...existingHistory].slice(0, 20),
+    payoutHistory: [record, ...existingHistory].slice(0, 25),
   };
 
   writeJSON(KEYS.sellers, sellers);
+
+  const payoutRequest: PayoutRequest = {
+    id: requestId,
+    docId: requestId,
+    sellerId: sellers[idx].docId || sellers[idx].uid || sellers[idx].id,
+    sellerEmail: sellers[idx].email,
+    storeName: sellers[idx].storeName,
+    ownerName: sellers[idx].ownerName,
+    phone: sellers[idx].phone,
+    payoutAccount: cleanAccount,
+    amount: cleanAmount,
+    status: 'pending',
+    requestedAt: nowIso,
+  };
+  const existingRequests = getPayoutRequestsLocal().filter((r) => r.id !== requestId);
+  savePayoutRequestsLocal([payoutRequest, ...existingRequests]);
 
   const cur = getStoredCurrentSeller();
   if (
@@ -1393,16 +1315,19 @@ export function requestSellerPayoutLocal(
 
   return {
     success: true,
-    message: `Payout request recorded for ${cleanAccount}. Smart Basket Admin will process it shortly.`,
+    message: `Payout request ${requestId} logged for ${cleanAccount}. Smart Basket Admin will process it shortly.`,
     seller: sellers[idx],
+    payoutRequest,
   };
 }
 
 export function markSellerPayoutPaidLocal(
   sellerIdentifier: string,
-  amountOverride?: number
-): { success: boolean; message: string; seller?: SellerProfile; paidAmount?: number } {
+  amountOverride?: number,
+  options?: { utrNumber?: string; requestId?: string; paidBy?: string }
+): { success: boolean; message: string; seller?: SellerProfile; paidAmount?: number; utrNumber?: string } {
   const cleanId = sellerIdentifier.trim().toLowerCase();
+  const cleanUtr = (options?.utrNumber || '').trim();
   const sellers = getStoredSellersLocal();
   const idx = sellers.findIndex(
     (s) =>
@@ -1417,7 +1342,7 @@ export function markSellerPayoutPaidLocal(
 
   const currentPending = Math.round(Number(sellers[idx].pendingPayoutAmount || 0) * 100) / 100;
   const fallbackAmt = Math.round(Number(amountOverride || 0) * 100) / 100;
-  const paidAmount = currentPending > 0 ? currentPending : fallbackAmt;
+  const paidAmount = fallbackAmt > 0 ? fallbackAmt : currentPending;
 
   if (paidAmount <= 0) {
     return { success: false, message: 'No pending payout balance to mark as paid.' };
@@ -1425,37 +1350,67 @@ export function markSellerPayoutPaidLocal(
 
   const nowIso = new Date().toISOString();
   const nextTotalPaidOut = Math.round((Number(sellers[idx].totalPaidOut || 0) + paidAmount) * 100) / 100;
+  const remainingPending = options?.requestId
+    ? Math.max(0, Math.round((currentPending - paidAmount) * 100) / 100)
+    : 0;
   const existingHistory = Array.isArray(sellers[idx].payoutHistory) ? sellers[idx].payoutHistory! : [];
-  const hadRequested = existingHistory.some((h) => h.status === 'requested');
+  const hadTargetRequest = options?.requestId
+    ? existingHistory.some((h) => h.id === options.requestId)
+    : existingHistory.some((h) => h.status === 'requested');
 
-  const updatedHistory: SellerPayoutRecord[] = hadRequested
-    ? existingHistory.map((h) =>
-        h.status === 'requested'
-          ? { ...h, status: 'paid' as const, paidAt: nowIso }
-          : h
-      )
+  const updatedHistory: SellerPayoutRecord[] = hadTargetRequest
+    ? existingHistory.map((h) => {
+        const matches = options?.requestId ? h.id === options.requestId : h.status === 'requested';
+        return matches
+          ? {
+              ...h,
+              status: 'paid' as const,
+              paidAt: nowIso,
+              utrNumber: cleanUtr || h.utrNumber,
+            }
+          : h;
+      })
     : [
         {
-          id: `po_${Date.now()}`,
+          id: options?.requestId || `PO-${Date.now().toString(36).toUpperCase()}`,
           amount: paidAmount,
           payoutAccount: sellers[idx].payoutAccount || 'Registered UPI/Bank',
           status: 'paid' as const,
           requestedAt: nowIso,
           paidAt: nowIso,
+          utrNumber: cleanUtr || undefined,
         },
         ...existingHistory,
-      ].slice(0, 20);
+      ].slice(0, 25);
 
   sellers[idx] = {
     ...sellers[idx],
     totalPaidOut: nextTotalPaidOut,
-    pendingPayoutAmount: 0,
-    payoutStatus: 'paid',
+    pendingPayoutAmount: remainingPending,
+    payoutStatus: remainingPending > 0 ? 'requested' : 'paid',
     lastPayoutPaidAt: nowIso,
     payoutHistory: updatedHistory,
   };
 
   writeJSON(KEYS.sellers, sellers);
+
+  // Sync local payout_requests cache as well
+  const reqs = getPayoutRequestsLocal();
+  const nextReqs = reqs.map((req) => {
+    const matchesSeller =
+      req.sellerId.toLowerCase() === cleanId ||
+      req.sellerEmail.trim().toLowerCase() === sellers[idx].email.trim().toLowerCase();
+    const matchesReq = options?.requestId ? req.id === options.requestId : matchesSeller && req.status === 'pending';
+    if (!matchesReq) return req;
+    return {
+      ...req,
+      status: 'paid' as const,
+      utrNumber: cleanUtr || req.utrNumber,
+      paidBy: options?.paidBy || req.paidBy,
+      paidAt: nowIso,
+    };
+  });
+  savePayoutRequestsLocal(nextReqs);
 
   const cur = getStoredCurrentSeller();
   if (
@@ -1469,9 +1424,12 @@ export function markSellerPayoutPaidLocal(
 
   return {
     success: true,
-    message: `Payout of ₹${paidAmount.toLocaleString('en-IN')} marked as Paid for ${sellers[idx].storeName}.`,
+    message: cleanUtr
+      ? `Payout of ₹${paidAmount.toLocaleString('en-IN')} marked Paid ✓ (UTR: ${cleanUtr}).`
+      : `Payout of ₹${paidAmount.toLocaleString('en-IN')} marked Paid ✓ for ${sellers[idx].storeName}.`,
     seller: sellers[idx],
     paidAmount,
+    utrNumber: cleanUtr || undefined,
   };
 }
 
@@ -1480,7 +1438,7 @@ export function markSellerPayoutPaidLocal(
 // =============================================================================
 
 export function getStoredOrdersLocal(): Order[] {
-  return readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  return readJSON<Order[]>(KEYS.orders, []);
 }
 
 function normalizeDeliveryBoyRecord(raw: Partial<DeliveryBoy>): DeliveryBoy {
@@ -2003,7 +1961,7 @@ export function assignOrderRiderLocal(
   rider: DeliveryBoy | null,
   deliveryOtp?: string
 ): { success: boolean; message: string; order?: Order; otp?: string } {
-  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  const orders = readJSON<Order[]>(KEYS.orders, []);
   const idx = orders.findIndex((o) => o.id === orderId);
   const otpToUse = deliveryOtp || (idx !== -1 && orders[idx].deliveryOtp) || generateDeliveryOtp();
   if (idx === -1) {
@@ -2067,7 +2025,7 @@ export function shipOrderViaCourierLocal(
   if (!cleanCourier || !cleanAwb) {
     return { success: false, message: 'Courier Partner Name and AWB Tracking Number are required.' };
   }
-  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  const orders = readJSON<Order[]>(KEYS.orders, []);
   const idx = orders.findIndex((o) => o.id === orderId);
   if (idx === -1) {
     return { success: true, message: `Order #${orderId} shipped via ${cleanCourier}.` };
@@ -2101,7 +2059,7 @@ export function markOrderOutForDeliveryLocal(
   orderId: number,
   coords?: { lat: number; lng: number } | null
 ): { success: boolean; message: string; order?: Order } {
-  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  const orders = readJSON<Order[]>(KEYS.orders, []);
   const idx = orders.findIndex((o) => o.id === orderId);
   if (idx === -1) return { success: true, message: `Order #${orderId} marked Out for Delivery.` };
   const nowIso = new Date().toISOString();
@@ -2125,7 +2083,7 @@ export function updateOrderRiderLocationLocal(
   lat: number,
   lng: number
 ): { success: boolean; message: string } {
-  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  const orders = readJSON<Order[]>(KEYS.orders, []);
   const idx = orders.findIndex((o) => o.id === orderId);
   if (idx !== -1) {
     orders[idx] = {
@@ -2151,7 +2109,7 @@ export function verifyAndDeliverOrderLocal(
     return { success: false, message: 'Please enter the 4-digit Delivery OTP provided by the customer.' };
   }
 
-  const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
+  const orders = readJSON<Order[]>(KEYS.orders, []);
   const idx = orders.findIndex((o) => o.id === orderId);
   const targetOtp = (expectedOtp || (idx !== -1 ? orders[idx].deliveryOtp : '') || '').trim();
   if (targetOtp && cleanEntered !== targetOtp) {
@@ -2225,5 +2183,61 @@ export function recordRecentlyViewedLocal(productId: number): number[] {
 export function clearRecentlyViewedLocal(): void {
   writeJSON(KEYS.recentlyViewed, []);
 }
+
+export function getRecentSearchesLocal(): string[] {
+  const raw = readJSON<string[]>(KEYS.recentSearches, []);
+  return Array.isArray(raw) ? raw.filter((s) => typeof s === 'string' && s.trim().length > 0) : [];
+}
+
+export function addRecentSearchLocal(term: string): string[] {
+  const clean = (term || '').trim();
+  if (clean.length < 2) return getRecentSearchesLocal();
+  const existing = getRecentSearchesLocal().filter(
+    (s) => s.toLowerCase() !== clean.toLowerCase()
+  );
+  const next = [clean, ...existing].slice(0, 8);
+  writeJSON(KEYS.recentSearches, next);
+  return next;
+}
+
+export function removeRecentSearchLocal(term: string): string[] {
+  const next = getRecentSearchesLocal().filter(
+    (s) => s.toLowerCase() !== (term || '').trim().toLowerCase()
+  );
+  writeJSON(KEYS.recentSearches, next);
+  return next;
+}
+
+export function clearRecentSearchesLocal(): void {
+  writeJSON(KEYS.recentSearches, []);
+}
+
+export function getSavedForLaterLocal(): CartEntry[] {
+  const raw = readJSON<CartEntry[]>(KEYS.savedForLater, []);
+  return Array.isArray(raw) ? raw.filter((e) => e && e.product && e.product.id) : [];
+}
+
+export function saveSavedForLaterLocal(entries: CartEntry[]): void {
+  writeJSON(KEYS.savedForLater, entries);
+}
+
+export function getProductQuestionsLocal(): ProductQuestion[] {
+  const raw = readJSON<ProductQuestion[]>(KEYS.productQuestions, []);
+  return Array.isArray(raw) ? raw : [];
+}
+
+export function saveProductQuestionsLocal(questions: ProductQuestion[]): void {
+  writeJSON(KEYS.productQuestions, questions);
+}
+
+export function getSupportTicketsLocal(): SupportTicket[] {
+  const raw = readJSON<SupportTicket[]>(KEYS.supportTickets, []);
+  return Array.isArray(raw) ? raw : [];
+}
+
+export function saveSupportTicketsLocal(tickets: SupportTicket[]): void {
+  writeJSON(KEYS.supportTickets, tickets);
+}
+
 
 

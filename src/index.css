@@ -48,3 +48,36 @@ input, textarea, select {
 .qk-dot-3 {
   animation: qkDotBounce 1.1s infinite ease-in-out both;
 }
+
+@media print {
+  @page {
+    margin: 10mm;
+  }
+  body.sb-printing-invoice * {
+    visibility: hidden !important;
+  }
+  body.sb-printing-invoice .sb-print-invoice-root,
+  body.sb-printing-invoice .sb-print-invoice-root * {
+    visibility: visible !important;
+  }
+  body.sb-printing-invoice .sb-print-invoice-root {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: none !important;
+    overflow: visible !important;
+    background: #ffffff !important;
+    box-shadow: none !important;
+    border: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  body.sb-printing-invoice .sb-print-invoice-root.sb-thermal-mode {
+    width: 78mm !important;
+    margin: 0 auto !important;
+  }
+  .print\:hidden {
+    display: none !important;
+  }
+}

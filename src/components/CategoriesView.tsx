@@ -1,6 +1,16 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { ASSETS } from '../store/localStore';
-import { Category, Product, formatINR, getDiscountPercent, getEffectiveMrp } from '../types';
+import {
+  CatalogFilterState,
+  CatalogSortOption,
+  Category,
+  EMPTY_CATALOG_FILTERS,
+  Product,
+  formatINR,
+  getDiscountPercent,
+  getEffectiveMrp,
+} from '../types';
+import { ShopSortFilterBar, applyCatalogFiltersAndSort } from './ShopSortFilterBar';
 
 export type SidebarCategoryKey =
   | 'for-you'
@@ -191,6 +201,8 @@ export const CategoriesView: React.FC<Props> = ({
 }) => {
   const [activeKey, setActiveKey] = useState<SidebarCategoryKey>('for-you');
   const [inlineSearchOpen, setInlineSearchOpen] = useState(false);
+  const [searchSortBy, setSearchSortBy] = useState<CatalogSortOption>('relevance');
+  const [searchFilters, setSearchFilters] = useState<CatalogFilterState>(EMPTY_CATALOG_FILTERS);
   const rightPaneRef = useRef<HTMLDivElement | null>(null);
 
   // Build left sidebar list: the 8 core shopping categories + any extra custom Firestore categories (e.g., Beauty)
@@ -307,19 +319,16 @@ export const CategoriesView: React.FC<Props> = ({
   };
 
   const liveSearchMatches = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
+    const q = searchQuery.trim();
     if (!q) return [];
-    const catNameById = new Map(categories.map((c) => [c.id, c.name.toLowerCase()]));
-    return products.filter((p) => {
-      const catName = catNameById.get(p.cat_id) || '';
-      return (
-        p.name.toLowerCase().includes(q) ||
-        p.description.toLowerCase().includes(q) ||
-        catName.includes(q) ||
-        (p.sellerName && p.sellerName.toLowerCase().includes(q))
-      );
+    return applyCatalogFiltersAndSort({
+      products,
+      categories,
+      searchQuery: q,
+      filters: searchFilters,
+      sortBy: searchSortBy,
     });
-  }, [searchQuery, products, categories]);
+  }, [searchQuery, products, categories, searchFilters, searchSortBy]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -409,35 +418,45 @@ export const CategoriesView: React.FC<Props> = ({
         )}
       </header>
 
-      {/* Live Real-Time Search Results Overlay inside Categories */}
+      {/* Live Real-Time Search Results Overlay inside Categories with Sticky Split Sort | Filter Bar */}
       {searchQuery.trim().length > 0 ? (
-        <main className="max-w-7xl w-full mx-auto flex-1 px-3 sm:px-6 py-4 pb-20 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-100">
-            <div>
-              <h2 className="text-sm sm:text-base font-extrabold text-slate-900">
-                Matching results for &ldquo;{searchQuery.trim()}&rdquo;
-              </h2>
-              <p className="text-xs text-slate-500 tabular-nums">
-                {liveSearchMatches.length} product{liveSearchMatches.length === 1 ? '' : 's'} found
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
+        <div className="flex-1 flex flex-col">
+          <ShopSortFilterBar
+            sortBy={searchSortBy}
+            onSortChange={setSearchSortBy}
+            filters={searchFilters}
+            onApplyFilters={setSearchFilters}
+            onResetAll={() => {
+              setSearchFilters(EMPTY_CATALOG_FILTERS);
+              setSearchSortBy('relevance');
+            }}
+            categories={categories}
+            allProducts={products}
+            searchQuery={searchQuery}
+            stickyTopClass="top-[108px]"
+          />
+          <main className="max-w-7xl w-full mx-auto flex-1 px-3 sm:px-6 py-4 pb-20 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-100">
+              <div>
+                <h2 className="text-sm sm:text-base font-extrabold text-slate-900">
+                  Results for &ldquo;{searchQuery.trim()}&rdquo;
+                </h2>
+                <p className="text-xs text-slate-500 tabular-nums">
+                  {liveSearchMatches.length} product{liveSearchMatches.length === 1 ? '' : 's'} found
+                </p>
+              </div>
               <button
                 type="button"
-                onClick={() => onBrowseShop({ query: searchQuery.trim(), catId: 0 })}
-                className="px-3 py-1.5 rounded-lg bg-[#2874F0] text-white text-xs font-bold hover:bg-[#1e60d5] transition whitespace-nowrap"
-              >
-                Sort &amp; Filter in Shop
-              </button>
-              <button
-                type="button"
-                onClick={() => onSearchChange('')}
+                onClick={() => {
+                  onSearchChange('');
+                  setSearchFilters(EMPTY_CATALOG_FILTERS);
+                  setSearchSortBy('relevance');
+                }}
                 className="px-3 py-1.5 rounded-lg bg-slate-100 text-slate-700 text-xs font-bold hover:bg-slate-200 transition whitespace-nowrap"
               >
-                Clear
+                Clear Search
               </button>
             </div>
-          </div>
 
           {liveSearchMatches.length === 0 ? (
             <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-10 text-center space-y-2.5">
@@ -520,7 +539,8 @@ export const CategoriesView: React.FC<Props> = ({
               })}
             </div>
           )}
-        </main>
+          </main>
+        </div>
       ) : (
       /* Split-Screen Container: Left 26% Sidebar + Right 74% Independently Scrollable Content Pane */
       <div className="max-w-7xl w-full mx-auto flex-1 flex h-[calc(100vh-112px)] md:h-[calc(100vh-56px)] overflow-hidden bg-white border-x border-slate-100">

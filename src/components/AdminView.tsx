@@ -15,9 +15,12 @@ import {
   shipOrderViaCourierFirestore,
   subscribeAllOrdersFirestore,
   subscribeAllSellersFirestore,
+  subscribeAllSupportTicketsFirestore,
   subscribeAllUsersFirestore,
   subscribeDeliveryBoysFirestore,
   subscribeDeliverySettingsFirestore,
+  subscribePayoutRequestsFirestore,
+  subscribeProductQuestionsFirestore,
   subscribePromoCodesFirestore,
   toggleDeliveryBoyStatusFirestore,
   toggleUserBlockFirestore,
@@ -25,15 +28,22 @@ import {
   updateOrderTrackingFirestore,
   updateSellerStatusFirestore,
 } from '../services/firestoreService';
+import { AdminFinancePanel } from './AdminFinancePanel';
 import { AdminPromosPanel } from './AdminPromosPanel';
+import { AdminSupportPanel } from './AdminSupportPanel';
+import { AdminUsersPanel } from './AdminUsersPanel';
+import { TaxInvoiceModal } from './TaxInvoiceModal';
 import {
   ASSETS,
   IMAGE_CHOICES,
   getBootstrapData,
   getDeliverySettingsLocal,
+  getPayoutRequestsLocal,
+  getProductQuestionsLocal,
   getPromoCodesLocal,
   getStoredDeliveryBoysLocal,
   getStoredSellersLocal,
+  getSupportTicketsLocal,
   loginAdminLocal,
   saveProductLocal,
   setStoredAdminLoggedIn,
@@ -48,23 +58,30 @@ import {
   ORDER_STATUS_OPTIONS,
   Order,
   OrderStatus,
+  PayoutRequest,
   Product,
+  ProductQuestion,
   PromoCode,
   SellerProfile,
+  SupportTicket,
   User,
   buildWhatsAppOrderShareUrl,
   calculateSellerEarnings,
   formatINR,
+  formatVariantSpecString,
   generateDeliveryOtp,
   getCourierTrackingUrl,
   getEffectiveMrp,
   getOrderStatusLabel,
   normalizeOrderStatus,
   normalizeSellerStatus,
+  parseVariantSpecString,
 } from '../types';
+import { exportOrdersToCsv } from '../utils/csvExport';
 
 type AdminTab =
   | 'dashboard'
+  | 'finance'
   | 'categories'
   | 'products'
   | 'orders'
@@ -72,6 +89,7 @@ type AdminTab =
   | 'delivery_boys'
   | 'sellers'
   | 'promos'
+  | 'support'
   | 'users'
   | 'settings';
 
@@ -164,6 +182,16 @@ export const AdminView: React.FC<Props> = ({
     getDeliverySettingsLocal() || DEFAULT_DELIVERY_SETTINGS
   );
   const [livePromos, setLivePromos] = useState<PromoCode[]>(() => getPromoCodesLocal());
+  const [livePayoutRequests, setLivePayoutRequests] = useState<PayoutRequest[]>(() =>
+    getPayoutRequestsLocal()
+  );
+  const [liveSupportTickets, setLiveSupportTickets] = useState<SupportTicket[]>(() =>
+    getSupportTicketsLocal()
+  );
+  const [liveProductQuestions, setLiveProductQuestions] = useState<ProductQuestion[]>(() =>
+    getProductQuestionsLocal()
+  );
+  const [invoiceModalOrder, setInvoiceModalOrder] = useState<Order | null>(null);
 
   // Admin Login Form
   const [loginUser, setLoginUser] = useState('Seraj');
@@ -182,10 +210,13 @@ export const AdminView: React.FC<Props> = ({
   const [prodCatId, setProdCatId] = useState<number>(categories[0]?.id || 1);
   const [prodName, setProdName] = useState('');
   const [prodDesc, setProdDesc] = useState('');
+  const [prodVariantsSpec, setProdVariantsSpec] = useState('');
+  const [prodHighlightsSpec, setProdHighlightsSpec] = useState('');
   const [prodPrice, setProdPrice] = useState('');
   const [prodMrp, setProdMrp] = useState('');
   const [prodStock, setProdStock] = useState('20');
   const [prodImage, setProdImage] = useState(ASSETS.smartphone);
+  const [prodGalleryImages, setProdGalleryImages] = useState<string[]>([]);
   const [imageCompressing, setImageCompressing] = useState(false);
   const [imageUploadError, setImageUploadError] = useState('');
 
@@ -237,6 +268,13 @@ export const AdminView: React.FC<Props> = ({
     const unsubRiders = subscribeDeliveryBoysFirestore((list) => setLiveDeliveryBoys(list));
     const unsubDelivery = subscribeDeliverySettingsFirestore((settings) => setDeliverySettings(settings));
     const unsubPromos = subscribePromoCodesFirestore((promos) => setLivePromos(promos));
+    const unsubPayouts = subscribePayoutRequestsFirestore((reqs) => setLivePayoutRequests(reqs));
+    const unsubTickets = subscribeAllSupportTicketsFirestore((tickets) =>
+      setLiveSupportTickets(tickets)
+    );
+    const unsubQuestions = subscribeProductQuestionsFirestore((qs) =>
+      setLiveProductQuestions(qs)
+    );
     return () => {
       unsubOrders();
       unsubUsers();
@@ -244,6 +282,9 @@ export const AdminView: React.FC<Props> = ({
       unsubRiders();
       unsubDelivery();
       unsubPromos();
+      unsubPayouts();
+      unsubTickets();
+      unsubQuestions();
     };
   }, [isAdminLoggedIn, showModal]);
 
@@ -268,7 +309,7 @@ export const AdminView: React.FC<Props> = ({
             <div className="w-12 h-12 rounded-xl bg-[#FFE500] text-[#2874F0] flex items-center justify-center mx-auto shadow-sm">
               <i className="fa-solid fa-shield-halved text-xl"></i>
             </div>
-            <h1 className="mt-3 text-xl font-extrabold tracking-tight">Quick Kart Seller Admin</h1>
+            <h1 className="mt-3 text-xl font-extrabold tracking-tight">Smart Basket Admin</h1>
             <p className="mt-1 text-xs text-blue-100">Default credentials: Seraj / seraj123</p>
           </div>
           <div className="p-6">
@@ -335,6 +376,15 @@ export const AdminView: React.FC<Props> = ({
   const approvedRiders = liveDeliveryBoys.filter((r) => r.kycStatus === 'approved');
   const rejectedKycRiders = liveDeliveryBoys.filter((r) => r.kycStatus === 'rejected');
   const activeApprovedRiders = approvedRiders.filter((r) => r.status === 'active');
+  const pendingPayoutRequestsCount = Math.max(
+    livePayoutRequests.filter((r) => r.status === 'pending').length,
+    pendingPayoutSellersCount
+  );
+  const ridersWithPendingCodCount = approvedRiders.filter((r) => Number(r.codCashInHand || 0) > 0).length;
+  const financeAttentionCount = pendingPayoutRequestsCount + ridersWithPendingCodCount;
+  const openTicketsCount = liveSupportTickets.filter((t) => t.status !== 'Resolved').length;
+  const unansweredQaCount = liveProductQuestions.filter((q) => !q.answer).length;
+  const supportAttentionCount = openTicketsCount + unansweredQaCount;
   const totalCodCashInHand = approvedRiders.reduce((sum, r) => sum + Number(r.codCashInHand || 0), 0);
   const activeOrder = liveOrders.find((o) => o.id === selectedOrderId) || null;
 
@@ -387,10 +437,17 @@ export const AdminView: React.FC<Props> = ({
     setProdCatId(prod ? prod.cat_id : categories[0]?.id || 1);
     setProdName(prod ? prod.name : '');
     setProdDesc(prod ? prod.description : '');
+    setProdVariantsSpec(prod ? formatVariantSpecString(prod.variants) : '');
+    setProdHighlightsSpec(prod && Array.isArray(prod.highlights) ? prod.highlights.join('\n') : '');
     setProdPrice(prod ? String(prod.price) : '');
     setProdMrp(prod ? String(getEffectiveMrp(prod.price, prod.mrp)) : '');
     setProdStock(prod ? String(prod.stock) : '20');
     setProdImage(prod ? prod.image : ASSETS.smartphone);
+    setProdGalleryImages(
+      prod && Array.isArray(prod.images)
+        ? prod.images.filter((img) => img && img !== prod.image).slice(0, 3)
+        : []
+    );
     setImageCompressing(false);
     setImageUploadError('');
     setProdModalOpen(true);
@@ -413,12 +470,35 @@ export const AdminView: React.FC<Props> = ({
     }
   };
 
+  const handleAdditionalGalleryPhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || prodGalleryImages.length >= 3) return;
+
+    setImageUploadError('');
+    setImageCompressing(true);
+    try {
+      const compressedDataUrl = await compressImageFileToDataUrl(file, 500, 0.7);
+      setProdGalleryImages((prev) => [...prev, compressedDataUrl].slice(0, 3));
+    } catch (err) {
+      setImageUploadError(err instanceof Error ? err.message : 'Unable to process gallery photo.');
+    } finally {
+      setImageCompressing(false);
+    }
+  };
+
   const saveProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     showLoader('Saving product...');
     const priceNum = Number(prodPrice);
     const mrpNum = Number(prodMrp);
     const stockNum = Math.max(0, Math.floor(Number(prodStock) || 0));
+    const allImages = Array.from(new Set([prodImage, ...prodGalleryImages].filter(Boolean))).slice(0, 4);
+    const parsedVariants = parseVariantSpecString(prodVariantsSpec);
+    const parsedHighlights = prodHighlightsSpec
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
     const res = await saveProductFirestore({
       id: editingProd?.id || 0,
       docId: editingProd?.docId,
@@ -431,6 +511,9 @@ export const AdminView: React.FC<Props> = ({
       reviews: editingProd?.reviews,
       stock: stockNum,
       image: prodImage,
+      images: allImages,
+      variants: parsedVariants.length > 0 ? parsedVariants : undefined,
+      highlights: parsedHighlights.length > 0 ? parsedHighlights : undefined,
       created_at: editingProd?.created_at,
       sellerId: editingProd?.sellerId,
       sellerEmail: editingProd?.sellerEmail,
@@ -447,6 +530,9 @@ export const AdminView: React.FC<Props> = ({
         rating: editingProd?.rating,
         stock: stockNum,
         image: prodImage,
+        images: allImages,
+        variants: parsedVariants.length > 0 ? parsedVariants : undefined,
+        highlights: parsedHighlights.length > 0 ? parsedHighlights : undefined,
         sellerId: editingProd?.sellerId,
         sellerEmail: editingProd?.sellerEmail,
         sellerName: editingProd?.sellerName,
@@ -833,13 +919,93 @@ export const AdminView: React.FC<Props> = ({
     });
   };
 
+  const handleFinanceMarkPayoutPaid = async (
+    seller: SellerProfile,
+    amount: number,
+    options: { utrNumber: string; requestId?: string }
+  ) => {
+    showLoader('Recording payout settlement...');
+    const res = await markSellerPayoutPaidFirestore(seller, amount, {
+      utrNumber: options.utrNumber,
+      requestId: options.requestId,
+      paidBy: adminUsername,
+    });
+    hideLoader();
+    if (res.success && res.seller) {
+      setLiveSellers((prev) =>
+        prev.map((s) =>
+          (s.docId || s.uid || s.id) === (seller.docId || seller.uid || seller.id)
+            ? res.seller!
+            : s
+        )
+      );
+      setLivePayoutRequests(getPayoutRequestsLocal());
+      onRefresh();
+      showModal({
+        title: 'Seller Payout Settled ✓',
+        message: res.message,
+        type: 'success',
+      });
+    } else {
+      showModal({
+        title: 'Payout Error',
+        message: res.message,
+        type: 'error',
+      });
+    }
+  };
+
+  const handleFinanceSettleRiderCod = async (rider: DeliveryBoy, note: string) => {
+    showLoader('Reconciling COD cash handover...');
+    const res = await settleRiderCodCashFirestore(rider, note);
+    hideLoader();
+    if (res.success && res.rider) {
+      setLiveDeliveryBoys((prev) =>
+        prev.map((r) => ((r.docId || r.id) === (rider.docId || rider.id) ? res.rider! : r))
+      );
+      onRefresh();
+      showModal({
+        title: 'COD Handover Settled ✓',
+        message: res.message,
+        type: 'success',
+      });
+    } else {
+      showModal({
+        title: 'Settlement Error',
+        message: res.message,
+        type: 'error',
+      });
+    }
+  };
+
   const toggleUserBlock = async (user: User) => {
-    showLoader('Updating user...');
-    const res = await toggleUserBlockFirestore(user, user.status === 'blocked' ? 'active' : 'blocked');
+    const nextStatus: 'active' | 'blocked' = user.status === 'blocked' ? 'active' : 'blocked';
+    showLoader(nextStatus === 'blocked' ? 'Blocking user...' : 'Activating user...');
+    const res = await toggleUserBlockFirestore(user, nextStatus);
     hideLoader();
     if (!res.success) {
       showModal({ title: 'Error', message: res.message, type: 'error' });
     } else {
+      setLiveUsers((prev) => {
+        const exists = prev.some(
+          (u) =>
+            (user.docId && u.docId === user.docId) ||
+            (user.uid && u.uid === user.uid) ||
+            (user.email && u.email?.toLowerCase() === user.email.toLowerCase()) ||
+            u.id === user.id
+        );
+        if (!exists) {
+          return [{ ...user, status: nextStatus }, ...prev];
+        }
+        return prev.map((u) =>
+          (user.docId && u.docId === user.docId) ||
+          (user.uid && u.uid === user.uid) ||
+          (user.email && u.email?.toLowerCase() === user.email.toLowerCase()) ||
+          u.id === user.id
+            ? { ...u, status: nextStatus }
+            : u
+        );
+      });
       onRefresh();
     }
   };
@@ -876,7 +1042,7 @@ export const AdminView: React.FC<Props> = ({
   const imageChoices = IMAGE_CHOICES;
 
   return (
-    <div className="min-h-screen bg-[#F1F3F6] pb-20 md:pb-10">
+    <div className="min-h-screen bg-[#F1F3F6] pb-20 md:pb-10 overflow-x-hidden max-w-full">
       {/* Admin Top Bar */}
       <header className="sticky top-0 z-40 bg-[#2874F0] text-white shadow-sm">
         <div className="max-w-7xl mx-auto px-3 sm:px-4 h-14 flex items-center justify-between gap-2 sm:gap-3">
@@ -889,16 +1055,16 @@ export const AdminView: React.FC<Props> = ({
             >
               <i className="fa-solid fa-bars text-lg"></i>
             </button>
-            <button type="button" onClick={() => setAdminTab('dashboard')} className="flex items-center gap-2 whitespace-nowrap min-w-0">
+            <button type="button" onClick={() => setAdminTab('dashboard')} className="flex items-center gap-1.5 whitespace-nowrap min-w-0">
               <span className="text-base sm:text-lg font-extrabold tracking-tight italic">
-                Quick <span className="text-[#FFE500]">Kart</span>
+                Smart <span className="text-[#FFE500]">Basket</span>
               </span>
               <span className="hidden sm:inline text-[11px] font-semibold text-blue-100">Admin</span>
             </button>
           </div>
 
-          <nav className="hidden lg:flex items-center gap-4 text-xs font-semibold text-blue-100">
-            {(['dashboard', 'categories', 'products', 'orders', 'promos', 'delivery_boys', 'sellers', 'users', 'settings'] as AdminTab[]).map((t) => (
+          <nav className="hidden lg:flex items-center gap-3 text-xs font-semibold text-blue-100">
+            {(['dashboard', 'finance', 'orders', 'products', 'categories', 'promos', 'support', 'delivery_boys', 'sellers', 'users', 'settings'] as AdminTab[]).map((t) => (
               <button
                 key={t}
                 type="button"
@@ -906,8 +1072,26 @@ export const AdminView: React.FC<Props> = ({
                 className={`whitespace-nowrap transition inline-flex items-center gap-1 ${adminTab === t ? 'text-[#FFE500] font-bold' : 'hover:text-white'}`}
               >
                 <span className="capitalize">
-                  {t === 'delivery_boys' ? 'Delivery Boys' : t === 'promos' ? 'Coupons & Delivery' : t}
+                  {t === 'finance'
+                    ? 'Finance'
+                    : t === 'delivery_boys'
+                    ? 'Riders'
+                    : t === 'promos'
+                    ? 'Coupons'
+                    : t === 'support'
+                    ? 'Support'
+                    : t}
                 </span>
+                {t === 'finance' && financeAttentionCount > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full bg-[#FFE500] text-[#2874F0] text-[10px] font-extrabold tabular-nums">
+                    {financeAttentionCount}
+                  </span>
+                )}
+                {t === 'support' && supportAttentionCount > 0 && (
+                  <span className="px-1.5 py-0.2 rounded-full bg-[#FFE500] text-[#2874F0] text-[10px] font-extrabold tabular-nums">
+                    {supportAttentionCount}
+                  </span>
+                )}
                 {t === 'sellers' && sellerAttentionCount > 0 && (
                   <span className="px-1.5 py-0.2 rounded-full bg-[#FFE500] text-[#2874F0] text-[10px] font-extrabold tabular-nums">
                     {sellerAttentionCount}
@@ -931,8 +1115,8 @@ export const AdminView: React.FC<Props> = ({
               <span className="w-7 h-7 rounded-full bg-[#FFE500] text-[#2874F0] text-xs font-extrabold flex items-center justify-center shrink-0">
                 MS
               </span>
-              <div className="leading-tight">
-                <p className="text-[11px] sm:text-xs font-bold text-white whitespace-nowrap">Md. Seraj (Mudassir)</p>
+              <div className="leading-tight min-w-0">
+                <p className="text-[11px] sm:text-xs font-bold text-white truncate max-w-[105px] sm:max-w-none">Md. Seraj (Mudassir)</p>
                 <span className="inline-block text-[9px] font-extrabold uppercase tracking-wide px-1.5 py-0.2 rounded bg-[#FFE500] text-[#2874F0]">
                   Store Owner
                 </span>
@@ -975,9 +1159,11 @@ export const AdminView: React.FC<Props> = ({
         <nav className="flex-1 px-3 py-4 space-y-1">
           {[
             { id: 'dashboard', label: 'Dashboard', icon: 'fa-chart-pie' },
+            { id: 'finance', label: 'Finance & Settlements', icon: 'fa-scale-balanced', badge: financeAttentionCount },
             { id: 'categories', label: 'Categories', icon: 'fa-tags' },
             { id: 'products', label: 'Products', icon: 'fa-boxes-stacked' },
             { id: 'orders', label: 'Orders', icon: 'fa-receipt' },
+            { id: 'support', label: 'Help Desk & Q&A', icon: 'fa-headset', badge: supportAttentionCount },
             { id: 'promos', label: 'Promo Codes & Delivery', icon: 'fa-ticket' },
             { id: 'delivery_boys', label: 'Delivery Boys', icon: 'fa-motorcycle', badge: pendingKycRiders.length },
             { id: 'sellers', label: 'Sellers Management', icon: 'fa-store', badge: sellerAttentionCount },
@@ -1019,7 +1205,7 @@ export const AdminView: React.FC<Props> = ({
         </div>
       </aside>
 
-      <main className="max-w-6xl mx-auto px-4 py-5 space-y-6">
+      <main className="max-w-6xl w-full mx-auto px-3 sm:px-4 py-5 space-y-6 overflow-x-hidden">
         {adminTab === 'dashboard' && (
           <>
             {/* Admin Profile Section */}
@@ -1036,7 +1222,7 @@ export const AdminView: React.FC<Props> = ({
                     </span>
                   </div>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Admin Username: <span className="font-semibold text-slate-700">{adminUsername}</span> · Quick Kart Store Management
+                    Admin Username: <span className="font-semibold text-slate-700">{adminUsername}</span> · Smart Basket Store Management
                   </p>
                 </div>
               </div>
@@ -1112,6 +1298,17 @@ export const AdminView: React.FC<Props> = ({
                   {pendingSellersCount > 0 && (
                     <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-extrabold tabular-nums">
                       {pendingSellersCount}
+                    </span>
+                  )}
+                </button>
+                <button type="button" onClick={() => setAdminTab('support')} className="p-4 rounded-xl bg-white border border-slate-200 text-slate-800 hover:border-[#2874F0] transition flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-2.5">
+                    <i className="fa-solid fa-headset text-[#2874F0] text-lg"></i>
+                    <span className="text-xs font-bold">Help Desk ({openTicketsCount})</span>
+                  </span>
+                  {supportAttentionCount > 0 && (
+                    <span className="px-1.5 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[10px] font-extrabold tabular-nums">
+                      {supportAttentionCount}
                     </span>
                   )}
                 </button>
@@ -1214,8 +1411,253 @@ export const AdminView: React.FC<Props> = ({
                 </div>
                 <p className="text-xs text-slate-500 mt-0.5">Update any order status, courier tracking, or process 7-day return/refund requests live</p>
               </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const res = exportOrdersToCsv(liveOrders, 'smart-basket-admin-orders');
+                  showModal({
+                    title: 'CSV Report Exported',
+                    message: `Downloaded ${res.filename} with ${res.exportedCount} order record${res.exportedCount === 1 ? '' : 's'}.`,
+                    type: 'success',
+                  });
+                }}
+                className="px-3.5 py-2 rounded-lg bg-[#0F172A] hover:bg-slate-800 text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition shrink-0"
+              >
+                <i className="fa-solid fa-file-csv text-[#FFE500]"></i>
+                <span>Export Orders CSV</span>
+              </button>
             </div>
-            <div className="bg-white rounded-xl border border-slate-200/80 overflow-hidden">
+            {/* Mobile Responsive Order Cards (Zero horizontal overflow on 360px–414px) */}
+            <div className="md:hidden space-y-3">
+              {liveOrders.length === 0 ? (
+                <div className="bg-white rounded-xl border border-slate-200/80 p-8 text-center text-xs text-slate-500">
+                  No orders placed yet.
+                </div>
+              ) : (
+                liveOrders.map((ord) => {
+                  const normalizedValue = normalizeOrderStatus(ord.status);
+                  const isReturnReq = normalizedValue === 'Return Requested';
+                  const isReturnApproved = normalizedValue === 'Return Approved';
+                  const isActiveDispatchable = !['Delivered', 'Cancelled', 'Refunded'].includes(normalizedValue);
+                  const isCourierDispatched = ord.dispatchMode === 'courier' || (!ord.deliveryBoyId && Boolean(ord.trackingId));
+                  return (
+                    <div
+                      key={`mob-${ord.docId || ord.id}`}
+                      onClick={() => {
+                        setSelectedOrderId(ord.id);
+                        populateTrackingDrafts(ord);
+                        setAdminTab('order_detail');
+                      }}
+                      className={`w-full max-w-full overflow-hidden rounded-xl border p-3.5 space-y-3 cursor-pointer transition ${
+                        isReturnReq
+                          ? 'bg-amber-50/70 border-amber-300'
+                          : 'bg-white border-slate-200/80'
+                      }`}
+                    >
+                      {/* Top Row: Order ID + Date + Amount */}
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="font-mono text-sm font-extrabold text-slate-900 tabular-nums">
+                              #{ord.id}
+                            </span>
+                            {isReturnReq && (
+                              <span className="px-1.5 py-0.5 rounded bg-amber-500 text-white text-[9px] font-extrabold uppercase tracking-wide">
+                                Return Requested
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            {new Date(ord.created_at).toLocaleDateString('en-IN', {
+                              day: '2-digit',
+                              month: 'short',
+                              year: 'numeric',
+                            })}
+                          </p>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <p className="font-mono text-sm font-extrabold text-slate-900 tabular-nums">
+                            {formatINR(ord.total_amount)}
+                          </p>
+                          <p className="text-[10px] font-semibold text-slate-500">
+                            {ord.paymentMethod || 'Cash on Delivery'}
+                          </p>
+                        </div>
+                      </div>
+
+                      {/* Customer Summary */}
+                      <div className="flex items-center justify-between gap-2 text-xs text-slate-700 pt-2 border-t border-slate-100">
+                        <span className="font-bold text-slate-900 truncate">{ord.name}</span>
+                        <span className="text-[11px] font-mono text-slate-500 shrink-0 tabular-nums">
+                          {ord.phone}
+                        </span>
+                      </div>
+
+                      {/* Live Status Selector */}
+                      <div className="space-y-1.5" onClick={(e) => e.stopPropagation()}>
+                        <label className="block text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                          Order Status
+                        </label>
+                        <select
+                          aria-label={`Mobile status for order #${ord.id}`}
+                          value={normalizedValue}
+                          onChange={(e) =>
+                            handleQuickOrderStatusUpdate(ord, e.target.value as OrderStatus)
+                          }
+                          className={`w-full min-w-0 h-9 px-2.5 rounded-lg border text-xs font-bold focus:outline-none focus:border-[#2874F0] ${
+                            normalizedValue === 'Delivered' || normalizedValue === 'Refunded'
+                              ? 'bg-emerald-50 border-emerald-200 text-[#2E7D32]'
+                              : normalizedValue === 'Return Requested'
+                              ? 'bg-amber-100 border-amber-300 text-amber-900'
+                              : normalizedValue === 'Cancelled'
+                              ? 'bg-rose-50 border-rose-200 text-rose-700'
+                              : 'bg-blue-50 border-blue-200 text-[#2874F0]'
+                          }`}
+                        >
+                          {ORDER_STATUS_OPTIONS.map((opt) => (
+                            <option key={opt.value} value={opt.value}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                        {ord.returnReason && (
+                          <p className="text-[11px] font-semibold text-amber-800 break-words">
+                            <i className="fa-solid fa-rotate-left mr-1 text-[10px]"></i>
+                            {ord.returnResolution || 'Return'}: {ord.returnReason}
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Hybrid Dispatch Controls (Full-width stacked inside card, zero overflow) */}
+                      <div className="space-y-2 pt-2 border-t border-slate-100" onClick={(e) => e.stopPropagation()}>
+                        <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                          Hybrid Dispatch (Rider / Courier)
+                        </p>
+                        {isActiveDispatchable && (
+                          <div className="grid grid-cols-1 gap-2">
+                            <select
+                              aria-label={`Mobile assign rider for order #${ord.id}`}
+                              value={ord.deliveryBoyId || ''}
+                              onChange={(e) => handleAssignOrderRider(ord, e.target.value)}
+                              className="w-full min-w-0 h-9 px-2.5 rounded-lg border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-800 focus:border-[#2874F0] focus:outline-none"
+                            >
+                              <option value="">— Assign Rider —</option>
+                              {activeApprovedRiders.map((r) => (
+                                <option key={r.docId || r.id} value={r.docId || r.id}>
+                                  {r.name} ({r.riderId})
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              type="button"
+                              onClick={() => openCourierShipModal(ord)}
+                              className="w-full h-9 px-3 rounded-lg bg-[#0F172A] hover:bg-slate-800 text-white text-xs font-bold transition inline-flex items-center justify-center gap-1.5"
+                            >
+                              <i className="fa-solid fa-box-open text-[11px] text-[#FFE500]"></i>
+                              <span>Ship via Courier</span>
+                            </button>
+                          </div>
+                        )}
+
+                        {ord.deliveryBoyName ? (
+                          <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                            <span className="px-2 py-0.5 rounded bg-blue-50 border border-blue-200 text-[#2874F0] font-bold">
+                              <i className="fa-solid fa-motorcycle mr-1"></i>
+                              {ord.deliveryBoyName}
+                            </span>
+                            {ord.deliveryOtp && (
+                              <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 font-mono font-extrabold">
+                                OTP: {ord.deliveryOtp}
+                              </span>
+                            )}
+                            {typeof ord.riderLiveLat === 'number' && typeof ord.riderLiveLng === 'number' && (
+                              <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold">
+                                GPS Live
+                              </span>
+                            )}
+                          </div>
+                        ) : isCourierDispatched ? (
+                          <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                            <span className="px-2 py-0.5 rounded bg-indigo-50 border border-indigo-200 text-indigo-800 font-bold">
+                              <i className="fa-solid fa-truck-fast mr-1"></i>
+                              {ord.courierName || 'Courier'}
+                            </span>
+                            {ord.trackingId && (
+                              <span className="font-mono text-[11px] font-bold text-slate-700 break-all">
+                                AWB: {ord.trackingId}
+                              </span>
+                            )}
+                          </div>
+                        ) : (
+                          <p className="text-[11px] text-slate-400">
+                            {activeApprovedRiders.length === 0
+                              ? 'No active riders yet (use Courier or approve riders)'
+                              : 'Awaiting Rider or Courier dispatch'}
+                          </p>
+                        )}
+                      </div>
+
+                      {/* Card Footer Actions */}
+                      <div
+                        className="flex flex-wrap items-center justify-between gap-2 pt-2.5 border-t border-slate-100"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedOrderId(ord.id);
+                            populateTrackingDrafts(ord);
+                            setAdminTab('order_detail');
+                          }}
+                          className="text-xs font-bold text-[#2874F0] hover:underline"
+                        >
+                          View Details <i className="fa-solid fa-chevron-right text-[10px] ml-0.5"></i>
+                        </button>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {isReturnReq && (
+                            <button
+                              type="button"
+                              onClick={() => handleQuickOrderStatusUpdate(ord, 'Return Approved')}
+                              className="px-2.5 py-1.5 rounded-lg bg-amber-600 text-white text-[11px] font-bold hover:bg-amber-700 transition"
+                            >
+                              Approve Return
+                            </button>
+                          )}
+                          {(isReturnReq || isReturnApproved) && (
+                            <button
+                              type="button"
+                              onClick={() => handleQuickOrderStatusUpdate(ord, 'Refunded')}
+                              className="px-2.5 py-1.5 rounded-lg bg-[#2E7D32] text-white text-[11px] font-bold hover:bg-emerald-800 transition"
+                            >
+                              Mark Refunded
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setInvoiceModalOrder(ord)}
+                            className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold transition inline-flex items-center gap-1"
+                          >
+                            <i className="fa-solid fa-print text-[11px] text-[#2874F0]"></i>
+                            <span>Print Invoice</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => openTrackingModal(ord)}
+                            className="px-3 py-1.5 rounded-lg bg-[#2874F0] text-white text-xs font-bold hover:bg-[#1e60d5] transition inline-flex items-center gap-1.5"
+                          >
+                            <i className="fa-solid fa-truck-fast text-[11px]"></i>
+                            <span>Tracking</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Desktop Orders Table */}
+            <div className="hidden md:block bg-white rounded-xl border border-slate-200/80 overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse">
                   <thead>
@@ -1399,6 +1841,14 @@ export const AdminView: React.FC<Props> = ({
                                 )}
                                 <button
                                   type="button"
+                                  onClick={() => setInvoiceModalOrder(ord)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold transition whitespace-nowrap inline-flex items-center gap-1"
+                                >
+                                  <i className="fa-solid fa-print text-[11px] text-[#2874F0]"></i>
+                                  <span>Print Invoice</span>
+                                </button>
+                                <button
+                                  type="button"
                                   onClick={() => openTrackingModal(ord)}
                                   className="px-3 py-1.5 rounded-lg bg-[#2874F0] text-white text-xs font-bold hover:bg-[#1e60d5] transition whitespace-nowrap inline-flex items-center gap-1.5"
                                 >
@@ -1434,15 +1884,25 @@ export const AdminView: React.FC<Props> = ({
                 </div>
               </div>
 
-              <a
-                href={buildWhatsAppOrderShareUrl(activeOrder, activeOrder.phone)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="px-3.5 py-2 rounded-lg bg-[#25D366] hover:bg-[#1ebe5d] text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition shrink-0"
-              >
-                <i className="fa-brands fa-whatsapp text-sm"></i>
-                <span>Share Order on WhatsApp</span>
-              </a>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setInvoiceModalOrder(activeOrder)}
+                  className="px-3.5 py-2 rounded-lg bg-[#0F172A] hover:bg-slate-800 text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition"
+                >
+                  <i className="fa-solid fa-print text-[#FFE500]"></i>
+                  <span>Print Invoice</span>
+                </button>
+                <a
+                  href={buildWhatsAppOrderShareUrl(activeOrder, activeOrder.phone)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3.5 py-2 rounded-lg bg-[#25D366] hover:bg-[#1ebe5d] text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition"
+                >
+                  <i className="fa-brands fa-whatsapp text-sm"></i>
+                  <span>Share Order on WhatsApp</span>
+                </a>
+              </div>
             </div>
 
             {activeOrder.status === 'Cancelled' && activeOrder.cancelReason && (
@@ -1530,11 +1990,11 @@ export const AdminView: React.FC<Props> = ({
                 {/* Hybrid Dispatch Control on Order Detail */}
                 <div className="pt-3 mt-2 border-t border-slate-100 space-y-2">
                   <p className="text-[11px] font-bold uppercase text-slate-500">Hybrid Dispatch</p>
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex flex-col sm:flex-row sm:items-center gap-2">
                     <select
                       value={activeOrder.deliveryBoyId || ''}
                       onChange={(e) => handleAssignOrderRider(activeOrder, e.target.value)}
-                      className="h-9 flex-1 min-w-[160px] px-2.5 rounded-lg border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-800"
+                      className="h-9 w-full sm:flex-1 min-w-0 px-2.5 rounded-lg border border-slate-200 bg-slate-50 text-xs font-semibold text-slate-800"
                     >
                       <option value="">— Assign Own Rider —</option>
                       {activeApprovedRiders.map((r) => (
@@ -1546,7 +2006,7 @@ export const AdminView: React.FC<Props> = ({
                     <button
                       type="button"
                       onClick={() => openCourierShipModal(activeOrder)}
-                      className="h-9 px-3 rounded-lg bg-[#0F172A] hover:bg-slate-800 text-white text-xs font-bold inline-flex items-center gap-1.5"
+                      className="h-9 w-full sm:w-auto px-3 rounded-lg bg-[#0F172A] hover:bg-slate-800 text-white text-xs font-bold inline-flex items-center justify-center gap-1.5 shrink-0"
                     >
                       <i className="fa-solid fa-box-open text-[#FFE500]"></i>
                       <span>Ship via Courier</span>
@@ -1686,6 +2146,9 @@ export const AdminView: React.FC<Props> = ({
                       <img src={it.product_image} alt={it.product_name} referrerPolicy="no-referrer" className="w-12 h-12 rounded-lg object-cover bg-slate-100" />
                       <div>
                         <p className="text-sm font-bold text-slate-900">{it.product_name}</p>
+                        {it.selectedVariant && (
+                          <p className="text-[11px] font-semibold text-[#2874F0]">{it.selectedVariant}</p>
+                        )}
                         <p className="text-xs text-slate-500 font-mono">{formatINR(it.price)} × {it.quantity}</p>
                       </div>
                     </div>
@@ -2370,40 +2833,12 @@ export const AdminView: React.FC<Props> = ({
         )}
 
         {adminTab === 'users' && (
-          <div className="space-y-4">
-            <h1 className="text-xl font-extrabold text-slate-900">Registered Users ({liveUsers.length})</h1>
-            {liveUsers.length === 0 ? (
-              <div className="bg-white rounded-xl border border-slate-200/80 p-8 text-center text-xs text-slate-500">
-                No registered customers in Firestore yet.
-              </div>
-            ) : (
-              liveUsers.map((u) => (
-                <div key={u.docId || u.uid || u.id} className="bg-white rounded-xl border border-slate-200/80 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-sm font-bold text-slate-900">{u.name}</h3>
-                      <span className={`text-[11px] font-semibold ${u.status === 'blocked' ? 'text-rose-600' : 'text-[#388E3C]'}`}>
-                        · {u.status === 'blocked' ? 'Blocked' : 'Active'}
-                      </span>
-                    </div>
-                    <p className="text-xs text-slate-500">{u.email || 'No email'} · {u.phone || 'No phone'}</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => toggleUserBlock(u)}
-                      className={`px-3.5 py-2 rounded-lg text-xs font-semibold ${u.status === 'blocked' ? 'bg-emerald-50 text-[#388E3C]' : 'bg-amber-50 text-amber-700'}`}
-                    >
-                      {u.status === 'blocked' ? 'Unblock' : 'Block'}
-                    </button>
-                    <button type="button" onClick={() => deleteUser(u)} className="px-3.5 py-2 rounded-lg bg-rose-50 text-rose-600 text-xs font-semibold">
-                      Delete
-                    </button>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
+          <AdminUsersPanel
+            users={liveUsers}
+            orders={liveOrders}
+            onToggleUserBlock={toggleUserBlock}
+            onDeleteUser={deleteUser}
+          />
         )}
 
         {adminTab === 'settings' && (
@@ -2440,12 +2875,45 @@ export const AdminView: React.FC<Props> = ({
           </div>
         )}
 
+        {adminTab === 'finance' && (
+          <AdminFinancePanel
+            orders={liveOrders}
+            sellers={liveSellers}
+            products={products}
+            deliveryBoys={liveDeliveryBoys}
+            payoutRequests={livePayoutRequests}
+            adminUsername={adminUsername}
+            onMarkPayoutPaid={handleFinanceMarkPayoutPaid}
+            onSettleRiderCod={handleFinanceSettleRiderCod}
+            showModal={showModal}
+          />
+        )}
+
         {adminTab === 'promos' && (
           <AdminPromosPanel
             deliverySettings={deliverySettings}
             promoCodes={livePromos}
             showLoader={showLoader}
             hideLoader={hideLoader}
+            showModal={showModal}
+          />
+        )}
+
+        {adminTab === 'support' && (
+          <AdminSupportPanel
+            tickets={liveSupportTickets}
+            questions={liveProductQuestions}
+            adminName={adminUsername || 'Smart Basket Admin'}
+            onTicketUpdated={(updatedTicket) => {
+              setLiveSupportTickets((prev) =>
+                prev.map((t) => (t.id === updatedTicket.id ? updatedTicket : t))
+              );
+            }}
+            onQuestionAnswered={(answeredQuestion) => {
+              setLiveProductQuestions((prev) =>
+                prev.map((q) => (q.id === answeredQuestion.id ? answeredQuestion : q))
+              );
+            }}
             showModal={showModal}
           />
         )}
@@ -2456,9 +2924,9 @@ export const AdminView: React.FC<Props> = ({
         <div className="grid grid-cols-6 h-14 items-center">
           {[
             { id: 'dashboard', label: 'Home', icon: 'fa-chart-pie' },
-            { id: 'products', label: 'Products', icon: 'fa-boxes-stacked' },
             { id: 'orders', label: 'Orders', icon: 'fa-receipt' },
-            { id: 'delivery_boys', label: 'Riders', icon: 'fa-motorcycle' },
+            { id: 'products', label: 'Products', icon: 'fa-boxes-stacked' },
+            { id: 'finance', label: 'Finance', icon: 'fa-scale-balanced' },
             { id: 'sellers', label: 'Sellers', icon: 'fa-store' },
             { id: 'users', label: 'Users', icon: 'fa-users' },
           ].map((b) => (
@@ -2466,18 +2934,22 @@ export const AdminView: React.FC<Props> = ({
               key={b.id}
               type="button"
               onClick={() => setAdminTab(b.id as AdminTab)}
-              className={`relative flex flex-col items-center justify-center h-full ${adminTab === b.id ? 'text-[#2874F0]' : 'text-slate-500'}`}
+              className={`relative flex flex-col items-center justify-center h-full px-0.5 ${
+                adminTab === b.id || (b.id === 'orders' && adminTab === 'order_detail')
+                  ? 'text-[#2874F0]'
+                  : 'text-slate-500'
+              }`}
             >
               <i className={`fa-solid ${b.icon} text-base`}></i>
-              <span className="text-[10px] font-semibold mt-0.5">{b.label}</span>
+              <span className="text-[10px] font-semibold mt-0.5 leading-none">{b.label}</span>
               {b.id === 'sellers' && sellerAttentionCount > 0 && (
-                <span className="absolute top-1.5 right-1.5 min-w-[15px] h-[15px] px-1 rounded-full bg-[#FB641B] text-white text-[9px] font-extrabold flex items-center justify-center tabular-nums">
+                <span className="absolute top-1 right-1 min-w-[15px] h-[15px] px-1 rounded-full bg-[#FB641B] text-white text-[9px] font-extrabold flex items-center justify-center tabular-nums">
                   {sellerAttentionCount}
                 </span>
               )}
-              {b.id === 'delivery_boys' && pendingKycRiders.length > 0 && (
-                <span className="absolute top-1.5 right-1.5 min-w-[15px] h-[15px] px-1 rounded-full bg-amber-500 text-white text-[9px] font-extrabold flex items-center justify-center tabular-nums">
-                  {pendingKycRiders.length}
+              {b.id === 'finance' && financeAttentionCount > 0 && (
+                <span className="absolute top-1 right-1 min-w-[15px] h-[15px] px-1 rounded-full bg-amber-500 text-white text-[9px] font-extrabold flex items-center justify-center tabular-nums">
+                  {financeAttentionCount}
                 </span>
               )}
             </button>
@@ -2553,6 +3025,36 @@ export const AdminView: React.FC<Props> = ({
                 <label className="block text-xs font-semibold text-slate-700 mb-1">Description</label>
                 <textarea rows={3} value={prodDesc} onChange={(e) => setProdDesc(e.target.value)} required className="w-full p-3 rounded-xl bg-slate-50 border border-slate-200 text-sm" />
               </div>
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Product Variants <span className="font-normal text-slate-400">(Optional)</span>
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={prodVariantsSpec}
+                    onChange={(e) => setProdVariantsSpec(e.target.value)}
+                    placeholder={'Size: S, M, L, XL\nWeight: 500g, 1kg'}
+                    className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-mono"
+                  />
+                  <p className="mt-0.5 text-[10px] text-slate-400">
+                    One group per line, e.g. Size: S, M, L
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Key Highlights <span className="font-normal text-slate-400">(Optional)</span>
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={prodHighlightsSpec}
+                    onChange={(e) => setProdHighlightsSpec(e.target.value)}
+                    placeholder={'1 Year Brand Warranty\n100% Authentic Product'}
+                    className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs"
+                  />
+                  <p className="mt-0.5 text-[10px] text-slate-400">One highlight bullet per line</p>
+                </div>
+              </div>
               <div className="space-y-2.5">
                 <label className="block text-xs font-semibold text-slate-700">Product Photo</label>
 
@@ -2626,6 +3128,55 @@ export const AdminView: React.FC<Props> = ({
                     }
                     className="w-full h-9 px-3 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-700"
                   />
+                </div>
+
+                {/* Additional Product Gallery Photos (up to 3 extra, 4 total) */}
+                <div className="pt-2 border-t border-slate-100 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-slate-600">
+                      Additional Gallery Photos ({prodGalleryImages.length}/3 extra)
+                    </span>
+                    {prodGalleryImages.length < 3 && (
+                      <label className="inline-flex items-center gap-1.5 text-[11px] font-bold text-[#2874F0] hover:underline cursor-pointer">
+                        <i className="fa-solid fa-plus text-[10px]"></i>
+                        <span>Add Photo</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={handleAdditionalGalleryPhotoUpload}
+                          disabled={imageCompressing}
+                          className="sr-only"
+                        />
+                      </label>
+                    )}
+                  </div>
+                  {prodGalleryImages.length > 0 && (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {prodGalleryImages.map((imgUrl, idx) => (
+                        <div
+                          key={`${idx}-${imgUrl.slice(0, 24)}`}
+                          className="relative w-12 h-12 rounded-lg border border-slate-200 overflow-hidden bg-slate-50"
+                        >
+                          <img
+                            src={imgUrl}
+                            alt={`Gallery ${idx + 2}`}
+                            referrerPolicy="no-referrer"
+                            className="w-full h-full object-cover"
+                          />
+                          <button
+                            type="button"
+                            aria-label="Remove gallery photo"
+                            onClick={() =>
+                              setProdGalleryImages((prev) => prev.filter((_, i) => i !== idx))
+                            }
+                            className="absolute top-0.5 right-0.5 w-4 h-4 rounded-full bg-slate-900/80 text-white text-[9px] flex items-center justify-center"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
               <button
@@ -2992,6 +3543,12 @@ export const AdminView: React.FC<Props> = ({
           </div>
         </div>
       )}
+
+      {/* Printable GST Tax Invoice / Packing Slip Modal */}
+      <TaxInvoiceModal
+        order={invoiceModalOrder}
+        onClose={() => setInvoiceModalOrder(null)}
+      />
     </div>
   );
 };

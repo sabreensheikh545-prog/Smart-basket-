@@ -5,6 +5,11 @@ export interface Category {
   image: string;
 }
 
+export interface ProductVariantGroup {
+  label: string;
+  options: string[];
+}
+
 export interface Product {
   id: number;
   docId?: string;
@@ -17,10 +22,146 @@ export interface Product {
   reviews?: number;
   stock: number;
   image: string;
+  images?: string[];
+  variants?: ProductVariantGroup[];
+  highlights?: string[];
   created_at: string;
   sellerId?: string;
   sellerEmail?: string;
   sellerName?: string;
+}
+
+export function normalizeProductVariants(raw: unknown): ProductVariantGroup[] {
+  if (!Array.isArray(raw)) return [];
+  const result: ProductVariantGroup[] = [];
+  raw.forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    const obj = item as Record<string, unknown>;
+    const label = String(obj.label || '').trim();
+    const rawOptions = Array.isArray(obj.options)
+      ? obj.options.map((o) => String(o || '').trim()).filter(Boolean)
+      : [];
+    const uniqueOptions = Array.from(new Set(rawOptions));
+    if (label && uniqueOptions.length > 0) {
+      result.push({ label, options: uniqueOptions });
+    }
+  });
+  return result;
+}
+
+export function parseVariantSpecString(spec: string): ProductVariantGroup[] {
+  const lines = (spec || '')
+    .split(/\n|;/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const groups: ProductVariantGroup[] = [];
+  lines.forEach((line) => {
+    const colonIdx = line.indexOf(':');
+    if (colonIdx === -1) return;
+    const label = line.slice(0, colonIdx).trim();
+    const options = Array.from(
+      new Set(
+        line
+          .slice(colonIdx + 1)
+          .split(',')
+          .map((o) => o.trim())
+          .filter(Boolean)
+      )
+    );
+    if (label && options.length > 0) {
+      groups.push({ label, options });
+    }
+  });
+  return groups;
+}
+
+export function formatVariantSpecString(variants?: ProductVariantGroup[]): string {
+  if (!Array.isArray(variants) || variants.length === 0) return '';
+  return variants.map((v) => `${v.label}: ${v.options.join(', ')}`).join('\n');
+}
+
+export type CatalogSortOption = 'relevance' | 'price_asc' | 'price_desc' | 'top_rated';
+
+export type PriceRangeBucket = 'under_500' | '500_2000' | 'above_2000';
+
+export interface CatalogFilterState {
+  priceRanges: PriceRangeBucket[];
+  categoryIds: number[];
+  inStockOnly: boolean;
+}
+
+export const EMPTY_CATALOG_FILTERS: CatalogFilterState = {
+  priceRanges: [],
+  categoryIds: [],
+  inStockOnly: false,
+};
+
+export interface PincodeDeliveryEstimate {
+  isValid: boolean;
+  isExpress: boolean;
+  headline: string;
+  subtext: string;
+  pincode: string;
+}
+
+export function getPincodeDeliveryEstimate(rawPincode: string): PincodeDeliveryEstimate {
+  const clean = (rawPincode || '').replace(/\D/g, '').slice(0, 6);
+  if (!/^[1-9]\d{5}$/.test(clean)) {
+    return {
+      isValid: false,
+      isExpress: false,
+      headline: 'Enter a valid 6-digit pincode',
+      subtext: 'Check delivery date & COD availability',
+      pincode: clean,
+    };
+  }
+
+  const formatShortDate = (daysAhead: number) =>
+    new Date(Date.now() + daysAhead * 24 * 60 * 60 * 1000).toLocaleDateString('en-IN', {
+      weekday: 'short',
+      day: 'numeric',
+      month: 'short',
+    });
+
+  // Express next-day delivery for local Delhi / NCR pincodes (e.g. 110039)
+  const isDelhiLocal = clean.startsWith('110') || clean.startsWith('122') || clean.startsWith('201');
+  if (isDelhiLocal) {
+    return {
+      isValid: true,
+      isExpress: true,
+      headline: 'Delivery by Tomorrow, 6 PM',
+      subtext: `${formatShortDate(1)} · Express Local Dispatch`,
+      pincode: clean,
+    };
+  }
+
+  return {
+    isValid: true,
+    isExpress: false,
+    headline: 'Delivery in 2–4 Days',
+    subtext: `Expected ${formatShortDate(2)} – ${formatShortDate(4)}`,
+    pincode: clean,
+  };
+}
+
+export function getProductGalleryImages(product: Product, fallbackPool: string[] = []): string[] {
+  const unique: string[] = [];
+  const pushUnique = (url?: string) => {
+    const clean = (url || '').trim();
+    if (!clean) return;
+    if (!unique.includes(clean) && unique.length < 4) {
+      unique.push(clean);
+    }
+  };
+
+  pushUnique(product.image);
+  if (Array.isArray(product.images)) {
+    product.images.forEach(pushUnique);
+  }
+  if (unique.length < 3) {
+    fallbackPool.forEach(pushUnique);
+  }
+  return unique.length > 0 ? unique : [product.image];
 }
 
 export interface User {
@@ -104,6 +245,13 @@ export const DEFAULT_DELIVERY_SETTINGS: DeliverySettings = {
   platformFee: 10,
 };
 
+export interface StoreBannerSettings {
+  title: string;
+  subtitle?: string;
+  imageUrl: string;
+  updatedAt?: string;
+}
+
 export interface PromoCode {
   id: string;
   docId?: string;
@@ -134,6 +282,54 @@ export interface ProductReview {
   created_at: string;
 }
 
+export interface ProductQuestion {
+  id: string;
+  docId?: string;
+  productId: number;
+  productDocId?: string;
+  productName?: string;
+  userId: string;
+  userName: string;
+  question: string;
+  answer?: string;
+  answeredBy?: string;
+  answeredRole?: 'Seller' | 'Admin';
+  answeredAt?: string;
+  created_at: string;
+}
+
+export const SUPPORT_TICKET_CATEGORIES = [
+  'Delivery Delay',
+  'Damaged / Wrong Item',
+  'Refund / Payment Issue',
+  'Return / Replacement Help',
+  'Order Cancellation',
+  'Other Inquiry',
+] as const;
+
+export type SupportTicketCategory = (typeof SUPPORT_TICKET_CATEGORIES)[number];
+export type SupportTicketStatus = 'Open' | 'In Progress' | 'Resolved';
+
+export interface SupportTicket {
+  id: string;
+  docId?: string;
+  ticketNumber: string;
+  userId: string;
+  customerName: string;
+  customerEmail: string;
+  customerPhone: string;
+  orderId?: number;
+  orderDocId?: string;
+  category: SupportTicketCategory;
+  subject: string;
+  message: string;
+  status: SupportTicketStatus;
+  adminReply?: string;
+  resolvedAt?: string;
+  created_at: string;
+  updatedAt?: string;
+}
+
 export function calculatePromoDiscount(subtotal: number, promo?: PromoCode | null): number {
   if (!promo || !promo.active) return 0;
   const cleanSubtotal = Math.max(0, Number(subtotal) || 0);
@@ -160,6 +356,25 @@ export interface SellerPayoutRecord {
   amount: number;
   payoutAccount: string;
   status: 'requested' | 'paid';
+  requestedAt: string;
+  paidAt?: string;
+  utrNumber?: string;
+  note?: string;
+}
+
+export interface PayoutRequest {
+  id: string;
+  docId?: string;
+  sellerId: string;
+  sellerEmail: string;
+  storeName: string;
+  ownerName: string;
+  phone?: string;
+  payoutAccount: string;
+  amount: number;
+  status: 'pending' | 'paid';
+  utrNumber?: string;
+  paidBy?: string;
   requestedAt: string;
   paidAt?: string;
 }
@@ -216,6 +431,7 @@ export interface OrderItem {
   product_doc_id?: string;
   product_name: string;
   product_image: string;
+  selectedVariant?: string;
   quantity: number;
   price: number;
   sellerId?: string;
@@ -354,6 +570,12 @@ export interface Order {
 export interface CartEntry {
   product: Product;
   quantity: number;
+  selectedVariant?: string;
+}
+
+export function getCartEntryKey(productId: number, selectedVariant?: string): string {
+  const cleanVariant = (selectedVariant || '').trim();
+  return cleanVariant ? `${productId}__${cleanVariant}` : String(productId);
 }
 
 export function normalizeSellerStatus(status?: string): 'approved' | 'pending' | 'blocked' {
@@ -456,13 +678,14 @@ export function formatINR(amount: number): string {
 }
 
 export function getDiscountPercent(price: number, mrp?: number): number {
-  const original = mrp && mrp > price ? mrp : Math.round(price * 1.35);
-  if (original <= price) return 0;
+  const original = Number(mrp || 0);
+  if (!original || original <= price) return 0;
   return Math.round(((original - price) / original) * 100);
 }
 
 export function getEffectiveMrp(price: number, mrp?: number): number {
-  return mrp && mrp > price ? mrp : Math.round((price * 1.35) / 10) * 10 - 1;
+  const original = Number(mrp || 0);
+  return original > price ? original : price;
 }
 
 export function generateDeliveryOtp(): string {

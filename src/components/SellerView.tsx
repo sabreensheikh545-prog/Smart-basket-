@@ -42,11 +42,13 @@ import {
   buildWhatsAppOrderShareUrl,
   calculateSellerEarnings,
   formatINR,
+  formatVariantSpecString,
   getCourierTrackingUrl,
   getEffectiveMrp,
   getOrderStatusLabel,
   normalizeOrderStatus,
   normalizeSellerStatus,
+  parseVariantSpecString,
 } from '../types';
 import {
   EmailVerificationField,
@@ -54,11 +56,13 @@ import {
   IndianPincodeField,
   MobileAvailabilityState,
 } from './IndianVerificationFields';
+import { TaxInvoiceModal } from './TaxInvoiceModal';
 import {
   PincodeLookupResult,
   isValidIndianMobile,
   isValidIndianPincodeFormat,
 } from '../utils/indianKycValidation';
+import { exportOrdersToCsv } from '../utils/csvExport';
 
 type SellerTab = 'dashboard' | 'products' | 'orders' | 'order_detail' | 'profile';
 
@@ -151,6 +155,7 @@ export const SellerView: React.FC<Props> = ({
   const [sellerOrders, setSellerOrders] = useState<Order[]>([]);
   const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
   const [trackingModalOrder, setTrackingModalOrder] = useState<Order | null>(null);
+  const [invoiceModalOrder, setInvoiceModalOrder] = useState<Order | null>(null);
   const [orderStatusDraft, setOrderStatusDraft] = useState<OrderStatus>('Confirmed');
   const [trackingCourierDraft, setTrackingCourierDraft] = useState<string>('Delhivery');
   const [trackingIdDraft, setTrackingIdDraft] = useState<string>('');
@@ -190,6 +195,8 @@ export const SellerView: React.FC<Props> = ({
   const [prodCatId, setProdCatId] = useState<number>(categories[0]?.id || 1);
   const [prodName, setProdName] = useState('');
   const [prodDesc, setProdDesc] = useState('');
+  const [prodVariantsSpec, setProdVariantsSpec] = useState('');
+  const [prodHighlightsSpec, setProdHighlightsSpec] = useState('');
   const [prodPrice, setProdPrice] = useState('');
   const [prodMrp, setProdMrp] = useState('');
   const [prodStock, setProdStock] = useState('15');
@@ -623,6 +630,8 @@ export const SellerView: React.FC<Props> = ({
     setProdCatId(prod ? prod.cat_id : categories[0]?.id || 1);
     setProdName(prod ? prod.name : '');
     setProdDesc(prod ? prod.description : '');
+    setProdVariantsSpec(prod ? formatVariantSpecString(prod.variants) : '');
+    setProdHighlightsSpec(prod && Array.isArray(prod.highlights) ? prod.highlights.join('\n') : '');
     setProdPrice(prod ? String(prod.price) : '');
     setProdMrp(prod ? String(getEffectiveMrp(prod.price, prod.mrp)) : '');
     setProdStock(prod ? String(prod.stock) : '15');
@@ -667,6 +676,11 @@ export const SellerView: React.FC<Props> = ({
     const sellerId = sellerProfile.uid || sellerProfile.id;
     const sellerEmail = sellerProfile.email.trim().toLowerCase();
     const sellerName = sellerProfile.storeName;
+    const parsedVariants = parseVariantSpecString(prodVariantsSpec);
+    const parsedHighlights = prodHighlightsSpec
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
 
     showLoader(editingProd ? 'Updating product...' : 'Publishing product...');
     const fsRes = await saveProductFirestore({
@@ -681,6 +695,8 @@ export const SellerView: React.FC<Props> = ({
       reviews: editingProd?.reviews,
       stock: stockNum,
       image: prodImage,
+      variants: parsedVariants.length > 0 ? parsedVariants : undefined,
+      highlights: parsedHighlights.length > 0 ? parsedHighlights : undefined,
       created_at: editingProd?.created_at,
       sellerId,
       sellerEmail,
@@ -699,6 +715,8 @@ export const SellerView: React.FC<Props> = ({
         rating: editingProd?.rating,
         stock: stockNum,
         image: prodImage,
+        variants: parsedVariants.length > 0 ? parsedVariants : undefined,
+        highlights: parsedHighlights.length > 0 ? parsedHighlights : undefined,
         sellerId,
         sellerEmail,
         sellerName,
@@ -1395,16 +1413,34 @@ export const SellerView: React.FC<Props> = ({
                   </p>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setSellerTab('products');
-                  openProductModal();
-                }}
-                className="px-4 py-2.5 rounded-lg bg-[#FB641B] text-white text-xs font-bold hover:bg-[#e55812] transition shrink-0"
-              >
-                <i className="fa-solid fa-plus mr-1.5"></i>Add New Product
-              </button>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const slug = sellerProfile.storeName.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 24) || 'seller';
+                    const res = exportOrdersToCsv(sellerOrders, `smart-basket-${slug}-orders`);
+                    showModal({
+                      title: 'CSV Report Exported',
+                      message: `Downloaded ${res.filename} with ${res.exportedCount} store order record${res.exportedCount === 1 ? '' : 's'}.`,
+                      type: 'success',
+                    });
+                  }}
+                  className="px-3.5 py-2.5 rounded-lg bg-[#0F172A] text-white text-xs font-bold hover:bg-slate-800 transition inline-flex items-center gap-1.5"
+                >
+                  <i className="fa-solid fa-file-csv text-[#FFE500]"></i>
+                  <span>Export Orders CSV</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSellerTab('products');
+                    openProductModal();
+                  }}
+                  className="px-4 py-2.5 rounded-lg bg-[#FB641B] text-white text-xs font-bold hover:bg-[#e55812] transition"
+                >
+                  <i className="fa-solid fa-plus mr-1.5"></i>Add New Product
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3.5 sm:gap-4">
@@ -1485,13 +1521,13 @@ export const SellerView: React.FC<Props> = ({
 
                   <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-4">
                     <p className="text-[11px] font-bold uppercase tracking-wide text-[#1B5E20]">
-                      Net Seller Earnings / Withdrawable Balance
+                      Available Balance for Payout
                     </p>
                     <p className="mt-1.5 text-xl sm:text-2xl font-extrabold text-[#2E7D32] font-mono tabular-nums">
                       {formatINR(earnings.withdrawableBalance)}
                     </p>
                     <p className="mt-1 text-[11px] text-emerald-800">
-                      Net Earned: <strong className="font-mono">{formatINR(earnings.netEarnings)}</strong>
+                      90% Net Earned: <strong className="font-mono">{formatINR(earnings.netEarnings)}</strong>
                       {earnings.totalPaidOut > 0 ? ` · Paid: ${formatINR(earnings.totalPaidOut)}` : ''}
                     </p>
                   </div>
@@ -1529,7 +1565,7 @@ export const SellerView: React.FC<Props> = ({
                       </span>
                     ) : (
                       <span>
-                        Delivered earnings are available for direct bank/UPI withdrawal via Smart Basket Admin.
+                        Only delivered orders (excluding returns/cancellations) are eligible for direct UPI/Bank payout.
                       </span>
                     )}
                   </div>
@@ -1542,10 +1578,10 @@ export const SellerView: React.FC<Props> = ({
                     <i className="fa-solid fa-building-columns"></i>
                     <span>
                       {earnings.withdrawableBalance > 0
-                        ? `Request Payout (${formatINR(earnings.withdrawableBalance)})`
+                        ? `Request Payout to UPI/Bank (${formatINR(earnings.withdrawableBalance)})`
                         : earnings.pendingPayout > 0
                         ? 'Payout Requested (Pending Admin)'
-                        : 'Request Payout'}
+                        : 'Request Payout to UPI/Bank'}
                     </span>
                   </button>
                 </div>
@@ -1556,7 +1592,7 @@ export const SellerView: React.FC<Props> = ({
                       Recent Payout Requests
                     </p>
                     <div className="divide-y divide-slate-100 rounded-xl border border-slate-100 bg-slate-50/50">
-                      {sellerProfile.payoutHistory.slice(0, 4).map((rec) => (
+                      {sellerProfile.payoutHistory.slice(0, 6).map((rec) => (
                         <div key={rec.id} className="px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs">
                           <div className="min-w-0">
                             <p className="font-bold text-slate-800 truncate">
@@ -1566,6 +1602,7 @@ export const SellerView: React.FC<Props> = ({
                             <p className="text-[10px] text-slate-500">
                               Requested {new Date(rec.requestedAt).toLocaleDateString('en-IN')}
                               {rec.paidAt ? ` · Paid ${new Date(rec.paidAt).toLocaleDateString('en-IN')}` : ''}
+                              {rec.utrNumber ? ` · UTR: ${rec.utrNumber}` : ''}
                             </p>
                           </div>
                           <span
@@ -1575,7 +1612,7 @@ export const SellerView: React.FC<Props> = ({
                                 : 'bg-amber-100 text-amber-800'
                             }`}
                           >
-                            {rec.status === 'paid' ? 'Paid' : 'Pending'}
+                            {rec.status === 'paid' ? 'Paid ✓' : 'Pending'}
                           </span>
                         </div>
                       ))}
@@ -1718,11 +1755,29 @@ export const SellerView: React.FC<Props> = ({
         {/* MY ORDERS (Strictly filtered to orders containing seller's own items) */}
         {sellerTab === 'orders' && (
           <div className="space-y-5">
-            <div>
-              <h1 className="text-xl font-extrabold text-slate-900">My Store Orders ({sellerOrders.length})</h1>
-              <p className="text-xs text-slate-500">
-                Showing only orders containing your listed products and your store subtotal.
-              </p>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h1 className="text-xl font-extrabold text-slate-900">My Store Orders ({sellerOrders.length})</h1>
+                <p className="text-xs text-slate-500">
+                  Showing only orders containing your listed products and your store subtotal.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const slug = sellerProfile.storeName.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 24) || 'seller';
+                  const res = exportOrdersToCsv(sellerOrders, `smart-basket-${slug}-orders`);
+                  showModal({
+                    title: 'CSV Report Exported',
+                    message: `Downloaded ${res.filename} with ${res.exportedCount} store order record${res.exportedCount === 1 ? '' : 's'}.`,
+                    type: 'success',
+                  });
+                }}
+                className="px-3.5 py-2 rounded-lg bg-[#0F172A] hover:bg-slate-800 text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition shrink-0"
+              >
+                <i className="fa-solid fa-file-csv text-[#FFE500]"></i>
+                <span>Export Orders CSV</span>
+              </button>
             </div>
             <div className="bg-white rounded-xl border border-slate-200/80 overflow-hidden">
               <div className="overflow-x-auto">
@@ -1780,14 +1835,24 @@ export const SellerView: React.FC<Props> = ({
                             className="py-2.5 px-4 text-right"
                             onClick={(e) => e.stopPropagation()}
                           >
-                            <button
-                              type="button"
-                              onClick={() => openTrackingModal(ord)}
-                              className="px-3 py-1.5 rounded-lg bg-[#2874F0] text-white text-xs font-bold hover:bg-[#1e60d5] transition whitespace-nowrap inline-flex items-center gap-1.5"
-                            >
-                              <i className="fa-solid fa-truck-fast text-[11px]"></i>
-                              <span>Update Tracking</span>
-                            </button>
+                            <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setInvoiceModalOrder(ord)}
+                                className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold transition whitespace-nowrap inline-flex items-center gap-1"
+                              >
+                                <i className="fa-solid fa-print text-[11px] text-[#2874F0]"></i>
+                                <span>Print Invoice</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => openTrackingModal(ord)}
+                                className="px-3 py-1.5 rounded-lg bg-[#2874F0] text-white text-xs font-bold hover:bg-[#1e60d5] transition whitespace-nowrap inline-flex items-center gap-1.5"
+                              >
+                                <i className="fa-solid fa-truck-fast text-[11px]"></i>
+                                <span>Update Tracking</span>
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))
@@ -1820,15 +1885,25 @@ export const SellerView: React.FC<Props> = ({
                 </div>
               </div>
 
-              <a
-                href={buildWhatsAppOrderShareUrl(activeOrder, activeOrder.phone)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="px-3.5 py-2 rounded-lg bg-[#25D366] hover:bg-[#1ebe5d] text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition shrink-0"
-              >
-                <i className="fa-brands fa-whatsapp text-sm"></i>
-                <span>Share Order on WhatsApp</span>
-              </a>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => setInvoiceModalOrder(activeOrder)}
+                  className="px-3.5 py-2 rounded-lg bg-[#0F172A] hover:bg-slate-800 text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition"
+                >
+                  <i className="fa-solid fa-print text-[#FFE500]"></i>
+                  <span>Print Invoice</span>
+                </button>
+                <a
+                  href={buildWhatsAppOrderShareUrl(activeOrder, activeOrder.phone)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3.5 py-2 rounded-lg bg-[#25D366] hover:bg-[#1ebe5d] text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition"
+                >
+                  <i className="fa-brands fa-whatsapp text-sm"></i>
+                  <span>Share Order on WhatsApp</span>
+                </a>
+              </div>
             </div>
 
             {activeOrder.status === 'Cancelled' && activeOrder.cancelReason && (
@@ -2030,6 +2105,11 @@ export const SellerView: React.FC<Props> = ({
                       />
                       <div className="min-w-0">
                         <p className="text-sm font-bold text-slate-900 truncate">{it.product_name}</p>
+                        {it.selectedVariant && (
+                          <p className="text-[11px] font-semibold text-[#2874F0] truncate">
+                            {it.selectedVariant}
+                          </p>
+                        )}
                         <p className="text-xs text-slate-500 font-mono">
                           {formatINR(it.price)} × {it.quantity}
                         </p>
@@ -2275,6 +2355,37 @@ export const SellerView: React.FC<Props> = ({
                 />
               </div>
 
+              <div className="grid sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Product Variants <span className="font-normal text-slate-400">(Optional)</span>
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={prodVariantsSpec}
+                    onChange={(e) => setProdVariantsSpec(e.target.value)}
+                    placeholder={'Size: S, M, L, XL\nWeight: 500g, 1kg'}
+                    className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs font-mono"
+                  />
+                  <p className="mt-0.5 text-[10px] text-slate-400">
+                    One group per line, e.g. Size: S, M, L
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Key Highlights <span className="font-normal text-slate-400">(Optional)</span>
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={prodHighlightsSpec}
+                    onChange={(e) => setProdHighlightsSpec(e.target.value)}
+                    placeholder={'100% Authentic\nEasy 7-Day Replacement'}
+                    className="w-full p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs"
+                  />
+                  <p className="mt-0.5 text-[10px] text-slate-400">One highlight bullet per line</p>
+                </div>
+              </div>
+
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1.5">Product Photo</label>
                 <div className="flex items-center gap-3">
@@ -2442,6 +2553,12 @@ export const SellerView: React.FC<Props> = ({
           </div>
         </div>
       )}
+
+      {/* Printable GST Tax Invoice / Packing Slip Modal */}
+      <TaxInvoiceModal
+        order={invoiceModalOrder}
+        onClose={() => setInvoiceModalOrder(null)}
+      />
     </div>
   );
 };

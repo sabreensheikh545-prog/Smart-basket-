@@ -26,6 +26,7 @@ interface Props {
   onOpenReturnModal: (ord: Order) => void;
   onBuyAgain: (ord: Order) => void;
   onOpenReview: (target: { product: Product; order: Order; existing?: ProductReview | null }) => void;
+  onNeedHelp?: (ord: Order) => void;
 }
 
 function formatDateTime(iso?: string): string {
@@ -53,6 +54,7 @@ export const OrderDetailsView: React.FC<Props> = ({
   onOpenReturnModal,
   onBuyAgain,
   onOpenReview,
+  onNeedHelp,
 }) => {
   const [copiedAwb, setCopiedAwb] = useState(false);
   const [copiedOtp, setCopiedOtp] = useState(false);
@@ -273,14 +275,23 @@ export const OrderDetailsView: React.FC<Props> = ({
           <span>Share Order on WhatsApp</span>
         </a>
 
-        {!isCancelled && (
+        <button
+          type="button"
+          onClick={() => onOpenInvoice(order)}
+          className="px-3.5 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-900 text-xs font-extrabold inline-flex items-center gap-1.5 transition"
+        >
+          <i className="fa-solid fa-print text-[#2874F0]"></i>
+          <span>Print Invoice</span>
+        </button>
+
+        {onNeedHelp && (
           <button
             type="button"
-            onClick={() => onOpenInvoice(order)}
-            className="px-3.5 py-2 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold inline-flex items-center gap-1.5 transition"
+            onClick={() => onNeedHelp(order)}
+            className="px-3.5 py-2 rounded-lg bg-blue-50 hover:bg-blue-100 text-[#2874F0] text-xs font-extrabold inline-flex items-center gap-1.5 transition"
           >
-            <i className="fa-solid fa-file-invoice text-[#2874F0]"></i>
-            <span>Tax Invoice</span>
+            <i className="fa-solid fa-headset"></i>
+            <span>Need Help?</span>
           </button>
         )}
 
@@ -617,6 +628,11 @@ export const OrderDetailsView: React.FC<Props> = ({
                   >
                     {it.product_name}
                   </button>
+                  {it.selectedVariant && (
+                    <p className="text-[11px] font-semibold text-[#2874F0] mt-0.5">
+                      {it.selectedVariant}
+                    </p>
+                  )}
                   <p className="text-xs text-slate-500 mt-0.5">
                     Qty: {it.quantity} × {formatINR(it.price)}
                     {it.sellerName ? ` · Seller: ${it.sellerName}` : ''}

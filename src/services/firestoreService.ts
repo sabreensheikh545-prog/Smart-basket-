@@ -16,7 +16,6 @@ import {
 import { db, getFirestoreErrorMessage } from '../firebase';
 import {
   DEFAULT_CATEGORIES,
-  DEFAULT_PRODUCTS,
   DEFAULT_PROMO_CODES,
   assignOrderRiderLocal,
   authenticateDeliveryBoyLocal,
@@ -25,9 +24,12 @@ import {
   cacheOrdersLocal,
   cacheProductsLocal,
   cacheSellersLocal,
+  cacheUsersLocal,
   deductProductStockLocal,
   deleteDeliveryBoyLocal,
   getDeliverySettingsLocal,
+  getPayoutRequestsLocal,
+  getProductQuestionsLocal,
   getPromoCodesLocal,
   getReviewsLocal,
   getSavedAddressesLocal,
@@ -35,7 +37,11 @@ import {
   getStoredDeliveryBoysLocal,
   getStoredOrdersLocal,
   getStoredSellersLocal,
+  getStoredUsersLocal,
+  getStoreBannerLocal,
+  getSupportTicketsLocal,
   getWishlistIdsLocal,
+  isUserBlockedLocal,
   markOrderOutForDeliveryLocal,
   markSellerPayoutPaidLocal,
   recordRiderCodCollectionLocal,
@@ -47,14 +53,19 @@ import {
   saveAddressesLocal,
   saveDeliveryBoyLocal,
   saveDeliverySettingsLocal,
+  savePayoutRequestsLocal,
+  saveProductQuestionsLocal,
   savePromoCodesLocal,
   saveReviewsLocal,
   saveSellerProfileLocal,
+  saveStoreBannerLocal,
+  saveSupportTicketsLocal,
   saveWishlistIdsLocal,
   settleRiderCodCashLocal,
   shipOrderViaCourierLocal,
   submitRiderKycApplicationLocal,
   toggleDeliveryBoyStatusLocal,
+  toggleUserBlockByIdentityLocal,
   updateOrderRiderLocationLocal,
   updateOrderStatusLocal,
   updateOrderTrackingLocal,
@@ -69,20 +80,28 @@ import {
   Order,
   OrderItem,
   OrderStatus,
+  PayoutRequest,
   Product,
+  ProductQuestion,
   ProductReview,
+  ProductVariantGroup,
   PromoCode,
   RiderCashSettlement,
   RiderKycStatus,
   SavedAddress,
   SellerPayoutRecord,
   SellerProfile,
+  StoreBannerSettings,
+  SupportTicket,
+  SupportTicketCategory,
+  SupportTicketStatus,
   User,
   extractPincodeFromAddress,
   generateDeliveryOtp,
   getReturnWindowInfo,
   isOnlinePaidOrder,
   isOrderCancellable,
+  normalizeProductVariants,
   normalizeSellerStatus,
 } from '../types';
 import {
@@ -90,7 +109,6 @@ import {
   isValidIndianPincodeFormat,
 } from '../utils/indianKycValidation';
 
-let productsSeedAttempted = false;
 let categoriesSeedAttempted = false;
 
 function stableNumericId(str: string): number {
@@ -117,6 +135,20 @@ function mapCategoryDoc(id: string, data: Record<string, unknown>): Category {
 function mapProductDoc(id: string, data: Record<string, unknown>): Product {
   const price = Number(data.price || 0);
   const mrpRaw = data.mrp !== undefined && data.mrp !== null ? Number(data.mrp) : undefined;
+  const primaryImage = resolveAssetImage(typeof data.image === 'string' ? data.image : '');
+  const rawImages = Array.isArray(data.images)
+    ? data.images
+        .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+        .map((item) => resolveAssetImage(item))
+    : [];
+  const mergedImages = Array.from(new Set([primaryImage, ...rawImages].filter(Boolean))).slice(0, 4);
+
+  const rawVariants = normalizeProductVariants(data.variants);
+  const resolvedVariants = rawVariants.length > 0 ? rawVariants : undefined;
+  const rawHighlights = Array.isArray(data.highlights)
+    ? data.highlights.filter((h): h is string => typeof h === 'string' && h.trim().length > 0)
+    : undefined;
+
   return {
     id: typeof data.id === 'number' ? data.id : stableNumericId(id),
     docId: id,
@@ -128,7 +160,10 @@ function mapProductDoc(id: string, data: Record<string, unknown>): Product {
     rating: data.rating !== undefined && Number(data.reviews || 0) > 0 ? Number(data.rating) : 0,
     reviews: data.reviews !== undefined ? Math.max(0, Number(data.reviews)) : 0,
     stock: Math.max(0, Math.floor(Number(data.stock ?? 0))),
-    image: resolveAssetImage(typeof data.image === 'string' ? data.image : ''),
+    image: primaryImage,
+    images: mergedImages.length > 0 ? mergedImages : [primaryImage],
+    variants: resolvedVariants,
+    highlights: rawHighlights && rawHighlights.length > 0 ? rawHighlights : undefined,
     created_at: String(data.created_at || data.createdAt || new Date().toISOString()),
     sellerId: typeof data.sellerId === 'string' ? data.sellerId : undefined,
     sellerEmail: typeof data.sellerEmail === 'string' ? data.sellerEmail.trim().toLowerCase() : undefined,
@@ -148,6 +183,10 @@ function mapOrderDoc(id: string, data: Record<string, unknown>): Order {
       product_doc_id: typeof it.product_doc_id === 'string' ? it.product_doc_id : undefined,
       product_name: String(it.product_name || it.name || 'Product'),
       product_image: resolveAssetImage(typeof it.product_image === 'string' ? it.product_image : ''),
+      selectedVariant:
+        typeof it.selectedVariant === 'string' && it.selectedVariant.trim()
+          ? it.selectedVariant.trim()
+          : undefined,
       quantity: Number(it.quantity || 1),
       price: Number(it.price || 0),
       sellerId: typeof it.sellerId === 'string' ? it.sellerId : undefined,
@@ -281,6 +320,8 @@ function mapSellerDoc(id: string, data: Record<string, unknown>): SellerProfile 
       status: item.status === 'paid' ? 'paid' : 'requested',
       requestedAt: String(item.requestedAt || new Date().toISOString()),
       paidAt: typeof item.paidAt === 'string' ? item.paidAt : undefined,
+      utrNumber: typeof item.utrNumber === 'string' && item.utrNumber.trim() ? item.utrNumber.trim() : undefined,
+      note: typeof item.note === 'string' ? item.note : undefined,
     }));
 
   const rawPayoutStatus = String(data.payoutStatus || 'none');
@@ -329,34 +370,6 @@ async function seedDefaultCategories(): Promise<void> {
   }
 }
 
-async function seedDefaultProducts(): Promise<void> {
-  if (productsSeedAttempted) return;
-  productsSeedAttempted = true;
-  try {
-    const batch = writeBatch(db);
-    DEFAULT_PRODUCTS.forEach((prod) => {
-      const ref = doc(db, 'products', String(prod.id));
-      batch.set(ref, {
-        id: prod.id,
-        cat_id: prod.cat_id,
-        name: prod.name,
-        description: prod.description,
-        price: prod.price,
-        mrp: prod.mrp ?? null,
-        rating: 0,
-        reviews: 0,
-        stock: prod.stock,
-        image: prod.image,
-        created_at: prod.created_at,
-        createdAt: prod.created_at,
-      });
-    });
-    await batch.commit();
-  } catch {
-    // Ignore if security rules block initial unauthenticated seeding
-  }
-}
-
 export function subscribeCategoriesFirestore(
   onData: (categories: Category[]) => void,
   onError?: (message: string) => void
@@ -388,7 +401,8 @@ export function subscribeProductsFirestore(
     collection(db, 'products'),
     (snapshot) => {
       if (snapshot.empty) {
-        void seedDefaultProducts();
+        cacheProductsLocal([]);
+        onData([]);
         return;
       }
       const list = snapshot.docs
@@ -463,6 +477,9 @@ export async function saveProductFirestore(payload: {
   reviews?: number;
   stock: number;
   image: string;
+  images?: string[];
+  variants?: ProductVariantGroup[];
+  highlights?: string[];
   created_at?: string;
   sellerId?: string;
   sellerEmail?: string;
@@ -477,10 +494,21 @@ export async function saveProductFirestore(payload: {
     const numericId = payload.id && payload.id > 0 ? payload.id : Date.now();
     const docId = payload.docId || String(numericId);
     const mrpValue =
-      payload.mrp && payload.mrp > payload.price
-        ? payload.mrp
-        : Math.round((payload.price * 1.35) / 10) * 10 - 1;
+      payload.mrp && payload.mrp > payload.price ? payload.mrp : null;
     const nowIso = new Date().toISOString();
+    const galleryImages = Array.from(
+      new Set(
+        [payload.image, ...(Array.isArray(payload.images) ? payload.images : [])]
+          .map((u) => (u || '').trim())
+          .filter(Boolean)
+      )
+    ).slice(0, 4);
+    const cleanVariants =
+      payload.variants !== undefined ? normalizeProductVariants(payload.variants) : undefined;
+    const cleanHighlights =
+      payload.highlights !== undefined
+        ? payload.highlights.map((h) => h.trim()).filter(Boolean)
+        : undefined;
 
     const docPayload: Record<string, unknown> = {
       id: numericId,
@@ -493,11 +521,14 @@ export async function saveProductFirestore(payload: {
       reviews: payload.reviews ?? 0,
       stock: Math.max(0, Math.floor(payload.stock)),
       image: payload.image,
+      images: galleryImages.length > 0 ? galleryImages : [payload.image],
       created_at: payload.created_at || nowIso,
       createdAt: payload.created_at || nowIso,
       updatedAt: nowIso,
     };
 
+    if (cleanVariants !== undefined) docPayload.variants = cleanVariants;
+    if (cleanHighlights !== undefined) docPayload.highlights = cleanHighlights;
     if (payload.sellerId) docPayload.sellerId = payload.sellerId;
     if (payload.sellerEmail) docPayload.sellerEmail = payload.sellerEmail.trim().toLowerCase();
     if (payload.sellerName) docPayload.sellerName = payload.sellerName.trim();
@@ -649,34 +680,116 @@ export function subscribeAllUsersFirestore(
   onData: (users: User[]) => void,
   onError?: (message: string) => void
 ): () => void {
+  const localInitial = getStoredUsersLocal();
+  if (localInitial.length > 0) {
+    onData(localInitial);
+  }
   return onSnapshot(
     collection(db, 'users'),
     (snapshot) => {
       const list = snapshot.docs
         .map((d) => mapUserDoc(d.id, d.data() as Record<string, unknown>))
         .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      cacheUsersLocal(list);
       onData(list);
     },
     (err) => {
-      onError?.(getFirestoreErrorMessage(err));
+      const fallback = getStoredUsersLocal();
+      if (fallback.length > 0) {
+        onData(fallback);
+      } else {
+        onError?.(getFirestoreErrorMessage(err));
+      }
     }
   );
+}
+
+export function subscribeSingleUserFirestore(
+  uid: string,
+  onData: (user: User | null) => void
+): () => void {
+  const cleanUid = (uid || '').trim();
+  if (!cleanUid) return () => {};
+  return onSnapshot(
+    doc(db, 'users', cleanUid),
+    (snap) => {
+      if (!snap.exists()) {
+        onData(null);
+        return;
+      }
+      onData(mapUserDoc(snap.id, snap.data() as Record<string, unknown>));
+    },
+    () => {
+      // ignore permission errors on listener; checkout still verifies locally
+    }
+  );
+}
+
+export async function checkUserBlockedFirestore(uid?: string, email?: string): Promise<boolean> {
+  if (isUserBlockedLocal(uid, email)) return true;
+  const cleanUid = (uid || '').trim();
+  if (cleanUid) {
+    try {
+      const snap = await getDoc(doc(db, 'users', cleanUid));
+      if (snap.exists() && (snap.data() as Record<string, unknown>).status === 'blocked') {
+        return true;
+      }
+    } catch {
+      // fall through
+    }
+  }
+  const cleanEmail = (email || '').trim().toLowerCase();
+  if (cleanEmail) {
+    try {
+      const q = query(collection(db, 'users'), where('email', '==', cleanEmail));
+      const snap = await getDocs(q);
+      if (snap.docs.some((d) => (d.data() as Record<string, unknown>).status === 'blocked')) {
+        return true;
+      }
+    } catch {
+      // fall through
+    }
+  }
+  return false;
 }
 
 export async function toggleUserBlockFirestore(
   user: User,
   status: 'active' | 'blocked'
 ): Promise<{ success: boolean; message: string }> {
+  toggleUserBlockByIdentityLocal(user, status);
   const docId = user.docId || user.uid;
-  if (!docId) return { success: false, message: 'User record ID missing.' };
+  if (!docId) {
+    return {
+      success: true,
+      message: `User ${status === 'blocked' ? 'blocked' : 'activated'} successfully.`,
+    };
+  }
   try {
-    await updateDoc(doc(db, 'users', docId), {
-      status,
-      updatedAt: new Date().toISOString(),
-    });
-    return { success: true, message: `User ${status === 'blocked' ? 'blocked' : 'unblocked'}.` };
-  } catch (err) {
-    return { success: false, message: getFirestoreErrorMessage(err) };
+    await setDoc(
+      doc(db, 'users', docId),
+      {
+        id: user.id,
+        uid: user.uid || docId,
+        name: user.name,
+        email: (user.email || '').trim().toLowerCase(),
+        phone: user.phone || '',
+        address: user.address || '',
+        status,
+        created_at: user.created_at || new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+    return {
+      success: true,
+      message: `${user.name} is now ${status === 'blocked' ? 'Blocked' : 'Active'}.`,
+    };
+  } catch {
+    return {
+      success: true,
+      message: `${user.name} marked ${status === 'blocked' ? 'Blocked' : 'Active'} (synced locally).`,
+    };
   }
 }
 
@@ -799,10 +912,18 @@ export async function placeOrderFirestore(payload: {
   platformFee?: number;
   couponCode?: string;
   couponDiscount?: number;
-  items: { product: Product; quantity: number }[];
+  items: { product: Product; quantity: number; selectedVariant?: string }[];
 }): Promise<{ success: boolean; message: string; order?: Order }> {
   if (!payload.name.trim() || !payload.phone.trim() || !payload.address.trim() || payload.items.length === 0) {
     return { success: false, message: 'Please provide complete delivery details and cart items.' };
+  }
+
+  const isBlocked = await checkUserBlockedFirestore(payload.userId, payload.email);
+  if (isBlocked) {
+    return {
+      success: false,
+      message: 'Your account has been blocked by the administrator and cannot place orders.',
+    };
   }
 
   for (const entry of payload.items) {
@@ -836,6 +957,9 @@ export async function placeOrderFirestore(payload: {
         quantity: qty,
         price: unitPrice,
       };
+      if (entry.selectedVariant && entry.selectedVariant.trim()) {
+        item.selectedVariant = entry.selectedVariant.trim();
+      }
       if (entry.product.sellerId) item.sellerId = entry.product.sellerId;
       if (entry.product.sellerEmail) item.sellerEmail = entry.product.sellerEmail.trim().toLowerCase();
       if (entry.product.sellerName) item.sellerName = entry.product.sellerName;
@@ -1705,33 +1829,106 @@ export async function registerOrUpdateSellerFirestore(payload: {
   return localRes;
 }
 
+function mapPayoutRequestDoc(id: string, data: Record<string, unknown>): PayoutRequest {
+  return {
+    id: typeof data.id === 'string' && data.id.trim() ? data.id.trim() : id,
+    docId: id,
+    sellerId: String(data.sellerId || ''),
+    sellerEmail: String(data.sellerEmail || '').trim().toLowerCase(),
+    storeName: String(data.storeName || 'Seller Store'),
+    ownerName: String(data.ownerName || 'Seller'),
+    phone: typeof data.phone === 'string' ? data.phone : undefined,
+    payoutAccount: String(data.payoutAccount || ''),
+    amount: Math.max(0, Math.round(Number(data.amount || 0) * 100) / 100),
+    status: data.status === 'paid' ? 'paid' : 'pending',
+    utrNumber: typeof data.utrNumber === 'string' && data.utrNumber.trim() ? data.utrNumber.trim() : undefined,
+    paidBy: typeof data.paidBy === 'string' ? data.paidBy : undefined,
+    requestedAt: String(data.requestedAt || data.created_at || new Date().toISOString()),
+    paidAt: typeof data.paidAt === 'string' ? data.paidAt : undefined,
+  };
+}
+
+export function subscribePayoutRequestsFirestore(
+  onData: (requests: PayoutRequest[]) => void,
+  onError?: (message: string) => void
+): () => void {
+  const initialLocal = getPayoutRequestsLocal();
+  if (initialLocal.length > 0) {
+    onData(initialLocal);
+  }
+
+  return onSnapshot(
+    collection(db, 'payout_requests'),
+    (snapshot) => {
+      const fsList = snapshot.docs.map((d) =>
+        mapPayoutRequestDoc(d.id, d.data() as Record<string, unknown>)
+      );
+      const localList = getPayoutRequestsLocal();
+      const byId = new Map<string, PayoutRequest>();
+      localList.forEach((r) => byId.set(r.id, r));
+      fsList.forEach((r) => byId.set(r.id, r));
+      const merged = Array.from(byId.values()).sort(
+        (a, b) => new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime()
+      );
+      savePayoutRequestsLocal(merged);
+      onData(merged);
+    },
+    (err) => {
+      onData(getPayoutRequestsLocal());
+      onError?.(getFirestoreErrorMessage(err));
+    }
+  );
+}
+
 export async function requestSellerPayoutFirestore(
   seller: SellerProfile,
   amount: number,
   payoutAccount: string
-): Promise<{ success: boolean; message: string; seller?: SellerProfile }> {
+): Promise<{ success: boolean; message: string; seller?: SellerProfile; payoutRequest?: PayoutRequest }> {
   const identifier = seller.docId || seller.uid || seller.id || seller.email;
   const localRes = requestSellerPayoutLocal(identifier, amount, payoutAccount);
   if (!localRes.success || !localRes.seller) {
     return localRes;
   }
 
+  const nowIso = new Date().toISOString();
   const docId = seller.docId || seller.uid || seller.id;
-  if (!docId) return localRes;
 
   try {
-    await setDoc(
-      doc(db, 'sellers', docId),
-      {
-        payoutAccount: localRes.seller.payoutAccount,
-        pendingPayoutAmount: localRes.seller.pendingPayoutAmount ?? 0,
-        payoutStatus: 'requested',
-        payoutRequestedAt: localRes.seller.payoutRequestedAt,
-        payoutHistory: localRes.seller.payoutHistory ?? [],
-        updatedAt: new Date().toISOString(),
-      },
-      { merge: true }
-    );
+    if (docId) {
+      await setDoc(
+        doc(db, 'sellers', docId),
+        {
+          payoutAccount: localRes.seller.payoutAccount,
+          pendingPayoutAmount: localRes.seller.pendingPayoutAmount ?? 0,
+          payoutStatus: 'requested',
+          payoutRequestedAt: localRes.seller.payoutRequestedAt,
+          payoutHistory: localRes.seller.payoutHistory ?? [],
+          updatedAt: nowIso,
+        },
+        { merge: true }
+      );
+    }
+
+    if (localRes.payoutRequest) {
+      await setDoc(
+        doc(db, 'payout_requests', localRes.payoutRequest.id),
+        {
+          id: localRes.payoutRequest.id,
+          sellerId: localRes.payoutRequest.sellerId,
+          sellerEmail: localRes.payoutRequest.sellerEmail,
+          storeName: localRes.payoutRequest.storeName,
+          ownerName: localRes.payoutRequest.ownerName,
+          phone: localRes.payoutRequest.phone || '',
+          payoutAccount: localRes.payoutRequest.payoutAccount,
+          amount: localRes.payoutRequest.amount,
+          status: 'pending',
+          requestedAt: localRes.payoutRequest.requestedAt,
+          updatedAt: nowIso,
+        },
+        { merge: true }
+      );
+    }
   } catch {
     // Already persisted in localStore; keep UX seamless
   }
@@ -1741,30 +1938,105 @@ export async function requestSellerPayoutFirestore(
 
 export async function markSellerPayoutPaidFirestore(
   seller: SellerProfile,
-  amountOverride?: number
-): Promise<{ success: boolean; message: string; seller?: SellerProfile; paidAmount?: number }> {
+  amountOverride?: number,
+  options?: { utrNumber?: string; requestId?: string; paidBy?: string }
+): Promise<{ success: boolean; message: string; seller?: SellerProfile; paidAmount?: number; utrNumber?: string }> {
   const identifier = seller.docId || seller.uid || seller.id || seller.email;
-  const localRes = markSellerPayoutPaidLocal(identifier, amountOverride);
+  const localRes = markSellerPayoutPaidLocal(identifier, amountOverride, options);
   if (!localRes.success || !localRes.seller) {
     return localRes;
   }
 
+  const nowIso = new Date().toISOString();
   const docId = seller.docId || seller.uid || seller.id;
-  if (!docId) return localRes;
+  const cleanUtr = (options?.utrNumber || '').trim();
 
   try {
-    await setDoc(
-      doc(db, 'sellers', docId),
-      {
-        totalPaidOut: localRes.seller.totalPaidOut ?? 0,
-        pendingPayoutAmount: 0,
-        payoutStatus: 'paid',
-        lastPayoutPaidAt: localRes.seller.lastPayoutPaidAt,
-        payoutHistory: localRes.seller.payoutHistory ?? [],
-        updatedAt: new Date().toISOString(),
-      },
-      { merge: true }
-    );
+    if (docId) {
+      await setDoc(
+        doc(db, 'sellers', docId),
+        {
+          totalPaidOut: localRes.seller.totalPaidOut ?? 0,
+          pendingPayoutAmount: localRes.seller.pendingPayoutAmount ?? 0,
+          payoutStatus: localRes.seller.payoutStatus || 'paid',
+          lastPayoutPaidAt: localRes.seller.lastPayoutPaidAt || nowIso,
+          payoutHistory: localRes.seller.payoutHistory ?? [],
+          updatedAt: nowIso,
+        },
+        { merge: true }
+      );
+    }
+
+    if (options?.requestId) {
+      await setDoc(
+        doc(db, 'payout_requests', options.requestId),
+        {
+          id: options.requestId,
+          sellerId: docId || seller.id,
+          sellerEmail: seller.email,
+          storeName: seller.storeName,
+          ownerName: seller.ownerName,
+          payoutAccount: seller.payoutAccount || '',
+          amount: localRes.paidAmount ?? amountOverride ?? 0,
+          status: 'paid',
+          utrNumber: cleanUtr || null,
+          paidBy: options.paidBy || 'Admin',
+          paidAt: nowIso,
+          updatedAt: nowIso,
+        },
+        { merge: true }
+      );
+    } else {
+      // Mark any pending payout_requests for this seller as paid in Firestore
+      const pendingQuery = query(
+        collection(db, 'payout_requests'),
+        where('sellerEmail', '==', seller.email.trim().toLowerCase())
+      );
+      const snap = await getDocs(pendingQuery);
+      if (!snap.empty) {
+        const batch = writeBatch(db);
+        snap.docs.forEach((d) => {
+          const dData = d.data() as Record<string, unknown>;
+          if (dData.status !== 'paid') {
+            batch.set(
+              d.ref,
+              {
+                status: 'paid',
+                utrNumber: cleanUtr || null,
+                paidBy: options?.paidBy || 'Admin',
+                paidAt: nowIso,
+                updatedAt: nowIso,
+              },
+              { merge: true }
+            );
+          }
+        });
+        await batch.commit();
+      } else {
+        // Also log a direct settlement record into payout_requests for complete audit trail
+        const directId = `PO-${Date.now().toString(36).toUpperCase()}`;
+        await setDoc(
+          doc(db, 'payout_requests', directId),
+          {
+            id: directId,
+            sellerId: docId || seller.id,
+            sellerEmail: seller.email.trim().toLowerCase(),
+            storeName: seller.storeName,
+            ownerName: seller.ownerName,
+            phone: seller.phone || '',
+            payoutAccount: seller.payoutAccount || 'Registered UPI/Bank',
+            amount: localRes.paidAmount ?? amountOverride ?? 0,
+            status: 'paid',
+            utrNumber: cleanUtr || null,
+            paidBy: options?.paidBy || 'Admin',
+            requestedAt: nowIso,
+            paidAt: nowIso,
+            updatedAt: nowIso,
+          },
+          { merge: true }
+        );
+      }
+    }
   } catch {
     // Already persisted in localStore; keep UX seamless
   }
@@ -2522,6 +2794,103 @@ export async function saveDeliverySettingsFirestore(
   }
 }
 
+// ==================== ADMIN-CONTROLLED STORE BANNER (settings/banner) ====================
+
+function mapStoreBannerDoc(data: Record<string, unknown>): StoreBannerSettings | null {
+  const title = typeof data.title === 'string' ? data.title.trim() : '';
+  const subtitle = typeof data.subtitle === 'string' ? data.subtitle.trim() : '';
+  const imageUrl = typeof data.imageUrl === 'string' ? data.imageUrl.trim() : '';
+  if (!title && !imageUrl) return null;
+  return {
+    title,
+    subtitle: subtitle || undefined,
+    imageUrl,
+    updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : undefined,
+  };
+}
+
+export function subscribeStoreBannerFirestore(
+  onData: (banner: StoreBannerSettings | null) => void,
+  onError?: (message: string) => void
+): () => void {
+  const ref = doc(db, 'settings', 'banner');
+  return onSnapshot(
+    ref,
+    (snap) => {
+      if (snap.exists()) {
+        const mapped = mapStoreBannerDoc(snap.data() as Record<string, unknown>);
+        saveStoreBannerLocal(mapped);
+        onData(mapped);
+      } else {
+        saveStoreBannerLocal(null);
+        onData(null);
+      }
+    },
+    (err) => {
+      onData(getStoreBannerLocal());
+      onError?.(getFirestoreErrorMessage(err));
+    }
+  );
+}
+
+export async function saveStoreBannerFirestore(
+  banner: { title: string; subtitle?: string; imageUrl: string } | null
+): Promise<{ success: boolean; message: string; banner: StoreBannerSettings | null }> {
+  const cleanTitle = (banner?.title || '').trim();
+  const cleanSubtitle = (banner?.subtitle || '').trim();
+  const cleanImageUrl = (banner?.imageUrl || '').trim();
+  const nowIso = new Date().toISOString();
+
+  if (!cleanTitle && !cleanImageUrl) {
+    saveStoreBannerLocal(null);
+    try {
+      await setDoc(
+        doc(db, 'settings', 'banner'),
+        { title: '', subtitle: '', imageUrl: '', updatedAt: nowIso },
+        { merge: true }
+      );
+      return { success: true, banner: null, message: 'Store banner removed from Home Screen.' };
+    } catch (err) {
+      return {
+        success: true,
+        banner: null,
+        message: `Banner cleared locally (${getFirestoreErrorMessage(err)})`,
+      };
+    }
+  }
+
+  const nextBanner: StoreBannerSettings = {
+    title: cleanTitle,
+    subtitle: cleanSubtitle || undefined,
+    imageUrl: cleanImageUrl,
+    updatedAt: nowIso,
+  };
+  saveStoreBannerLocal(nextBanner);
+  try {
+    await setDoc(
+      doc(db, 'settings', 'banner'),
+      {
+        title: cleanTitle,
+        subtitle: cleanSubtitle,
+        imageUrl: cleanImageUrl,
+        updatedAt: nowIso,
+      },
+      { merge: true }
+    );
+    return {
+      success: true,
+      banner: nextBanner,
+      message: 'Store banner published live to Home Screen!',
+    };
+  } catch (err) {
+    return {
+      success: true,
+      banner: nextBanner,
+      message: `Banner saved locally (${getFirestoreErrorMessage(err)})`,
+    };
+  }
+}
+
 // ==================== PROMO CODES (promo_codes) ====================
 
 let promoSeedAttempted = false;
@@ -3074,5 +3443,339 @@ export async function submitProductReviewFirestore(input: {
     };
   }
 }
+
+// ==================== PRODUCT QUESTIONS & ANSWERS (product_questions) ====================
+
+function mapProductQuestionDoc(docId: string, data: Record<string, unknown>): ProductQuestion {
+  return {
+    id: String(data.id || docId),
+    docId,
+    productId: Number(data.productId || 0),
+    productDocId: typeof data.productDocId === 'string' ? data.productDocId : undefined,
+    productName: typeof data.productName === 'string' ? data.productName : undefined,
+    userId: String(data.userId || ''),
+    userName: String(data.userName || 'Smart Basket Shopper'),
+    question: String(data.question || '').trim(),
+    answer: typeof data.answer === 'string' && data.answer.trim() ? data.answer.trim() : undefined,
+    answeredBy: typeof data.answeredBy === 'string' && data.answeredBy.trim() ? data.answeredBy.trim() : undefined,
+    answeredRole: data.answeredRole === 'Admin' ? 'Admin' : data.answeredRole === 'Seller' ? 'Seller' : undefined,
+    answeredAt: typeof data.answeredAt === 'string' ? data.answeredAt : undefined,
+    created_at: typeof data.created_at === 'string' ? data.created_at : new Date().toISOString(),
+  };
+}
+
+export function subscribeProductQuestionsFirestore(
+  onData: (questions: ProductQuestion[]) => void
+): () => void {
+  onData(getProductQuestionsLocal());
+  return onSnapshot(
+    collection(db, 'product_questions'),
+    (snapshot) => {
+      const list = snapshot.docs
+        .map((d) => mapProductQuestionDoc(d.id, d.data() as Record<string, unknown>))
+        .filter((q) => q.productId > 0 && q.question.length > 0)
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      saveProductQuestionsLocal(list);
+      onData(list);
+    },
+    () => {
+      onData(getProductQuestionsLocal());
+    }
+  );
+}
+
+export async function submitProductQuestionFirestore(input: {
+  product: Product;
+  user: User;
+  question: string;
+}): Promise<{ success: boolean; message: string; item?: ProductQuestion }> {
+  const cleanQuestion = input.question.trim();
+  if (cleanQuestion.length < 6) {
+    return { success: false, message: 'Please enter a clear question (at least 6 characters).' };
+  }
+  const nowIso = new Date().toISOString();
+  const docId = `qa_${input.product.id}_${Date.now()}`;
+  const uid = input.user.uid || String(input.user.id);
+
+  const item: ProductQuestion = {
+    id: docId,
+    docId,
+    productId: input.product.id,
+    productDocId: input.product.docId || String(input.product.id),
+    productName: input.product.name,
+    userId: uid,
+    userName: input.user.name || 'Customer',
+    question: cleanQuestion,
+    created_at: nowIso,
+  };
+
+  const merged = [item, ...getProductQuestionsLocal().filter((q) => q.id !== item.id)];
+  saveProductQuestionsLocal(merged);
+
+  try {
+    await setDoc(doc(db, 'product_questions', docId), {
+      id: item.id,
+      productId: item.productId,
+      productDocId: item.productDocId || '',
+      productName: item.productName || '',
+      userId: item.userId,
+      userName: item.userName,
+      question: item.question,
+      created_at: item.created_at,
+      updatedAt: nowIso,
+    });
+    return { success: true, item, message: 'Your question has been posted! Seller/Admin will reply soon.' };
+  } catch (err) {
+    return {
+      success: true,
+      item,
+      message: `Question posted (${getFirestoreErrorMessage(err)})`,
+    };
+  }
+}
+
+export async function answerProductQuestionFirestore(input: {
+  question: ProductQuestion;
+  answer: string;
+  answeredBy: string;
+  answeredRole: 'Seller' | 'Admin';
+}): Promise<{ success: boolean; message: string; item?: ProductQuestion }> {
+  const cleanAnswer = input.answer.trim();
+  if (cleanAnswer.length < 3) {
+    return { success: false, message: 'Please enter a helpful answer.' };
+  }
+  const nowIso = new Date().toISOString();
+  const docId = input.question.docId || input.question.id;
+  const updated: ProductQuestion = {
+    ...input.question,
+    answer: cleanAnswer,
+    answeredBy: input.answeredBy.trim() || input.answeredRole,
+    answeredRole: input.answeredRole,
+    answeredAt: nowIso,
+  };
+
+  const localList = getProductQuestionsLocal();
+  const nextLocal = localList.some((q) => (q.docId || q.id) === docId)
+    ? localList.map((q) => ((q.docId || q.id) === docId ? updated : q))
+    : [updated, ...localList];
+  saveProductQuestionsLocal(nextLocal);
+
+  try {
+    await setDoc(
+      doc(db, 'product_questions', docId),
+      {
+        answer: updated.answer,
+        answeredBy: updated.answeredBy,
+        answeredRole: updated.answeredRole,
+        answeredAt: nowIso,
+        updatedAt: nowIso,
+      },
+      { merge: true }
+    );
+    return { success: true, item: updated, message: 'Answer published live.' };
+  } catch (err) {
+    return {
+      success: true,
+      item: updated,
+      message: `Answer saved (${getFirestoreErrorMessage(err)})`,
+    };
+  }
+}
+
+// ==================== CUSTOMER SUPPORT TICKETS (support_tickets) ====================
+
+function mapSupportTicketDoc(docId: string, data: Record<string, unknown>): SupportTicket {
+  const rawStatus = String(data.status || 'Open');
+  const status: SupportTicketStatus =
+    rawStatus === 'Resolved' ? 'Resolved' : rawStatus === 'In Progress' ? 'In Progress' : 'Open';
+  return {
+    id: String(data.id || docId),
+    docId,
+    ticketNumber: String(data.ticketNumber || `SB-${docId.slice(-6).toUpperCase()}`),
+    userId: String(data.userId || ''),
+    customerName: String(data.customerName || 'Customer'),
+    customerEmail: String(data.customerEmail || ''),
+    customerPhone: String(data.customerPhone || ''),
+    orderId: data.orderId !== undefined && data.orderId !== null && Number(data.orderId) > 0 ? Number(data.orderId) : undefined,
+    orderDocId: typeof data.orderDocId === 'string' && data.orderDocId.trim() ? data.orderDocId.trim() : undefined,
+    category: (typeof data.category === 'string' ? data.category : 'Other Inquiry') as SupportTicketCategory,
+    subject: String(data.subject || '').trim(),
+    message: String(data.message || '').trim(),
+    status,
+    adminReply: typeof data.adminReply === 'string' && data.adminReply.trim() ? data.adminReply.trim() : undefined,
+    resolvedAt: typeof data.resolvedAt === 'string' ? data.resolvedAt : undefined,
+    created_at: typeof data.created_at === 'string' ? data.created_at : new Date().toISOString(),
+    updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : undefined,
+  };
+}
+
+export function subscribeAllSupportTicketsFirestore(
+  onData: (tickets: SupportTicket[]) => void
+): () => void {
+  onData(getSupportTicketsLocal());
+  return onSnapshot(
+    collection(db, 'support_tickets'),
+    (snapshot) => {
+      const list = snapshot.docs
+        .map((d) => mapSupportTicketDoc(d.id, d.data() as Record<string, unknown>))
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      saveSupportTicketsLocal(list);
+      onData(list);
+    },
+    () => {
+      onData(getSupportTicketsLocal());
+    }
+  );
+}
+
+export function subscribeCustomerSupportTicketsFirestore(
+  userId: string,
+  onData: (tickets: SupportTicket[]) => void
+): () => void {
+  const cleanUid = (userId || '').trim();
+  const filterLocal = () =>
+    getSupportTicketsLocal().filter((t) => !cleanUid || t.userId === cleanUid);
+
+  if (!cleanUid) {
+    onData([]);
+    return () => {};
+  }
+  onData(filterLocal());
+
+  const q = query(collection(db, 'support_tickets'), where('userId', '==', cleanUid));
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list = snapshot.docs
+        .map((d) => mapSupportTicketDoc(d.id, d.data() as Record<string, unknown>))
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      onData(list);
+    },
+    () => {
+      onData(filterLocal());
+    }
+  );
+}
+
+export async function submitSupportTicketFirestore(input: {
+  user: User;
+  order?: Order | null;
+  category: SupportTicketCategory;
+  subject: string;
+  message: string;
+}): Promise<{ success: boolean; message: string; ticket?: SupportTicket }> {
+  const cleanSubject = input.subject.trim();
+  const cleanMessage = input.message.trim();
+  if (cleanSubject.length < 4) {
+    return { success: false, message: 'Please enter a brief subject for your issue.' };
+  }
+  if (cleanMessage.length < 10) {
+    return { success: false, message: 'Please describe your issue in at least 10 characters.' };
+  }
+
+  const nowIso = new Date().toISOString();
+  const docId = `tkt_${Date.now()}`;
+  const ticketNumber = `TKT-${String(Date.now()).slice(-6)}`;
+  const uid = input.user.uid || String(input.user.id);
+
+  const ticket: SupportTicket = {
+    id: docId,
+    docId,
+    ticketNumber,
+    userId: uid,
+    customerName: input.user.name || 'Customer',
+    customerEmail: (input.user.email || '').trim().toLowerCase(),
+    customerPhone: input.user.phone || '',
+    orderId: input.order?.id,
+    orderDocId: input.order?.docId,
+    category: input.category,
+    subject: cleanSubject,
+    message: cleanMessage,
+    status: 'Open',
+    created_at: nowIso,
+    updatedAt: nowIso,
+  };
+
+  const merged = [ticket, ...getSupportTicketsLocal().filter((t) => t.id !== ticket.id)];
+  saveSupportTicketsLocal(merged);
+
+  try {
+    await setDoc(doc(db, 'support_tickets', docId), {
+      id: ticket.id,
+      ticketNumber: ticket.ticketNumber,
+      userId: ticket.userId,
+      customerName: ticket.customerName,
+      customerEmail: ticket.customerEmail,
+      customerPhone: ticket.customerPhone,
+      orderId: ticket.orderId ?? null,
+      orderDocId: ticket.orderDocId ?? '',
+      category: ticket.category,
+      subject: ticket.subject,
+      message: ticket.message,
+      status: 'Open',
+      created_at: nowIso,
+      updatedAt: nowIso,
+    });
+    return {
+      success: true,
+      ticket,
+      message: `Support Ticket ${ticketNumber} raised! Our team will respond shortly.`,
+    };
+  } catch (err) {
+    return {
+      success: true,
+      ticket,
+      message: `Ticket ${ticketNumber} saved (${getFirestoreErrorMessage(err)})`,
+    };
+  }
+}
+
+export async function updateSupportTicketFirestore(input: {
+  ticket: SupportTicket;
+  status: SupportTicketStatus;
+  adminReply?: string;
+}): Promise<{ success: boolean; message: string; ticket?: SupportTicket }> {
+  const nowIso = new Date().toISOString();
+  const docId = input.ticket.docId || input.ticket.id;
+  const cleanReply = (input.adminReply ?? input.ticket.adminReply ?? '').trim();
+  const updated: SupportTicket = {
+    ...input.ticket,
+    status: input.status,
+    adminReply: cleanReply || undefined,
+    resolvedAt: input.status === 'Resolved' ? nowIso : input.ticket.resolvedAt,
+    updatedAt: nowIso,
+  };
+
+  const localList = getSupportTicketsLocal();
+  const nextLocal = localList.some((t) => (t.docId || t.id) === docId)
+    ? localList.map((t) => ((t.docId || t.id) === docId ? updated : t))
+    : [updated, ...localList];
+  saveSupportTicketsLocal(nextLocal);
+
+  try {
+    await setDoc(
+      doc(db, 'support_tickets', docId),
+      {
+        status: updated.status,
+        adminReply: cleanReply,
+        ...(updated.resolvedAt ? { resolvedAt: updated.resolvedAt } : {}),
+        updatedAt: nowIso,
+      },
+      { merge: true }
+    );
+    return {
+      success: true,
+      ticket: updated,
+      message: `Ticket ${updated.ticketNumber} marked as ${updated.status}.`,
+    };
+  } catch (err) {
+    return {
+      success: true,
+      ticket: updated,
+      message: `Ticket updated (${getFirestoreErrorMessage(err)})`,
+    };
+  }
+}
+
 
 
