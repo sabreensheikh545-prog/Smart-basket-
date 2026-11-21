@@ -1,5 +1,5 @@
 import React from 'react';
-import { Order, formatINR } from '../types';
+import { Order, buildWhatsAppOrderShareUrl, formatINR } from '../types';
 
 interface Props {
   order: Order | null;
@@ -39,6 +39,15 @@ export const TaxInvoiceModal: React.FC<Props> = ({ order, onClose }) => {
             <h2 className="text-sm sm:text-base font-extrabold">Tax Invoice · Order #{order.id}</h2>
           </div>
           <div className="flex items-center gap-2">
+            <a
+              href={buildWhatsAppOrderShareUrl(order)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-3 py-1.5 rounded-lg bg-[#25D366] hover:bg-[#1ebe5d] text-white text-xs font-bold inline-flex items-center gap-1.5"
+            >
+              <i className="fa-brands fa-whatsapp text-sm"></i>
+              <span className="hidden sm:inline">WhatsApp</span>
+            </a>
             <button
               type="button"
               onClick={() => window.print()}

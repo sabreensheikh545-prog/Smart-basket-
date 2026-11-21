@@ -17,6 +17,7 @@ import {
   subscribeSellerOrdersFirestore,
   subscribeSellerProfileFirestore,
   syncUserProfileFirestore,
+  updateOrderStatusFirestore,
   updateOrderTrackingFirestore,
 } from '../services/firestoreService';
 import {
@@ -38,6 +39,7 @@ import {
   Product,
   SellerProfile,
   User,
+  buildWhatsAppOrderShareUrl,
   calculateSellerEarnings,
   formatINR,
   getCourierTrackingUrl,
@@ -1800,22 +1802,97 @@ export const SellerView: React.FC<Props> = ({
         {/* SELLER ORDER DETAIL (Seller's items only) */}
         {sellerTab === 'order_detail' && activeOrder && (
           <div className="space-y-5 max-w-4xl">
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                onClick={() => setSellerTab('orders')}
-                className="w-10 h-10 rounded-lg bg-white border border-slate-200 flex items-center justify-center text-slate-700 hover:bg-slate-50"
-              >
-                <i className="fa-solid fa-arrow-left text-xs"></i>
-              </button>
-              <div>
-                <h1 className="text-xl font-extrabold text-slate-900 font-mono">Order #{activeOrder.id}</h1>
-                <p className="text-xs text-slate-500">
-                  {new Date(activeOrder.created_at).toLocaleString('en-IN')} · Status:{' '}
-                  <strong className="text-[#2874F0]">{getOrderStatusLabel(activeOrder.status)}</strong>
-                </p>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setSellerTab('orders')}
+                  className="w-10 h-10 rounded-lg bg-white border border-slate-200 flex items-center justify-center text-slate-700 hover:bg-slate-50"
+                >
+                  <i className="fa-solid fa-arrow-left text-xs"></i>
+                </button>
+                <div>
+                  <h1 className="text-xl font-extrabold text-slate-900 font-mono">Order #{activeOrder.id}</h1>
+                  <p className="text-xs text-slate-500">
+                    {new Date(activeOrder.created_at).toLocaleString('en-IN')} · Status:{' '}
+                    <strong className="text-[#2874F0]">{getOrderStatusLabel(activeOrder.status)}</strong>
+                  </p>
+                </div>
               </div>
+
+              <a
+                href={buildWhatsAppOrderShareUrl(activeOrder, activeOrder.phone)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3.5 py-2 rounded-lg bg-[#25D366] hover:bg-[#1ebe5d] text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition shrink-0"
+              >
+                <i className="fa-brands fa-whatsapp text-sm"></i>
+                <span>Share Order on WhatsApp</span>
+              </a>
             </div>
+
+            {activeOrder.status === 'Cancelled' && activeOrder.cancelReason && (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 p-3.5 text-xs text-rose-900 flex items-start gap-2.5">
+                <i className="fa-solid fa-ban text-rose-600 mt-0.5 shrink-0"></i>
+                <div>
+                  <p className="font-extrabold">Order Cancelled by Customer</p>
+                  <p className="mt-0.5">
+                    <strong>Reason:</strong> {activeOrder.cancelReason}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {(activeOrder.status === 'Return Requested' ||
+              activeOrder.status === 'Return Approved' ||
+              activeOrder.status === 'Refunded' ||
+              activeOrder.returnReason) && (
+              <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-start gap-3">
+                  {activeOrder.returnProofPhoto && (
+                    <img
+                      src={activeOrder.returnProofPhoto}
+                      alt="Customer return photo proof"
+                      className="w-16 h-16 rounded-lg object-cover border border-amber-300 shrink-0 bg-white"
+                    />
+                  )}
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="px-2 py-0.5 rounded bg-amber-600 text-white text-[10px] font-extrabold uppercase tracking-wide">
+                        {activeOrder.status}
+                      </span>
+                      <span className="text-xs font-bold text-amber-950">
+                        7-Day {activeOrder.returnResolution || 'Return'} Request
+                      </span>
+                    </div>
+                    {activeOrder.returnReason && (
+                      <p className="text-xs text-amber-900">
+                        <strong>Customer Reason:</strong> {activeOrder.returnReason}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                {activeOrder.status === 'Return Requested' && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      showLoader('Approving return...');
+                      const res = await updateOrderStatusFirestore(activeOrder, 'Return Approved');
+                      hideLoader();
+                      onRefresh();
+                      showModal({
+                        title: res.success ? 'Return Approved' : 'Error',
+                        message: res.message,
+                        type: res.success ? 'success' : 'error',
+                      });
+                    }}
+                    className="px-3.5 py-2 rounded-lg bg-amber-600 text-white text-xs font-bold hover:bg-amber-700 transition shrink-0"
+                  >
+                    Approve Return
+                  </button>
+                )}
+              </div>
+            )}
 
             <div className="grid md:grid-cols-2 gap-4">
               <div className="bg-white rounded-xl border border-slate-200/80 p-5 space-y-2.5">

@@ -254,6 +254,35 @@ export const RETURN_REASONS = [
   'Defective / Not Working',
 ] as const;
 
+export const CANCEL_REASONS = [
+  'Ordered by mistake',
+  'Found better price',
+  'Change delivery address',
+  'Delivery taking too long',
+  'Need to change payment method',
+  'Other reason',
+] as const;
+
+export interface ReturnRequest {
+  id: string;
+  docId?: string;
+  orderId: number;
+  orderDocId?: string;
+  userId?: string;
+  customerName: string;
+  customerPhone: string;
+  resolution: 'Return' | 'Replace';
+  reason: string;
+  proofPhoto?: string;
+  status: 'Pending' | 'Approved' | 'Refunded' | 'Rejected';
+  sellerIds?: string[];
+  sellerEmails?: string[];
+  items: OrderItem[];
+  totalAmount: number;
+  created_at: string;
+  updatedAt?: string;
+}
+
 export const ORDER_STATUS_OPTIONS: { value: OrderStatus; label: string }[] = [
   { value: 'Confirmed', label: 'Order Confirmed' },
   { value: 'Packed', label: 'Packed' },
@@ -293,6 +322,14 @@ export interface Order {
   returnReason?: string;
   returnResolution?: 'Return' | 'Replace';
   returnRequestedAt?: string;
+  returnProofPhoto?: string;
+  returnRequestId?: string;
+  returnApprovedAt?: string;
+  refundedAt?: string;
+  cancelReason?: string;
+  cancelledAt?: string;
+  packedAt?: string;
+  shippedAt?: string;
   created_at: string;
   items: OrderItem[];
   sellerIds?: string[];
@@ -472,4 +509,109 @@ export function getOrderDeliveryStage(order: Order): 'Assigned' | 'Out for Deliv
   }
   return 'Assigned';
 }
+
+export function isOrderCancellable(order: Pick<Order, 'status'>): boolean {
+  return (
+    order.status === 'Placed' ||
+    order.status === 'Confirmed' ||
+    order.status === 'Packed' ||
+    order.status === 'Shipped' ||
+    order.status === 'Dispatched'
+  );
+}
+
+export const RETURN_WINDOW_DAYS = 7;
+
+export function getReturnWindowInfo(
+  order: Pick<Order, 'status' | 'deliveredAt' | 'created_at'>
+): { eligible: boolean; daysLeft: number; expiresAt: Date | null } {
+  if (order.status !== 'Delivered') {
+    return { eligible: false, daysLeft: 0, expiresAt: null };
+  }
+  const baseStr = order.deliveredAt || order.created_at;
+  const baseDate = new Date(baseStr);
+  if (Number.isNaN(baseDate.getTime())) {
+    return { eligible: true, daysLeft: RETURN_WINDOW_DAYS, expiresAt: null };
+  }
+  const expiresAt = new Date(baseDate.getTime() + RETURN_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  const diffMs = expiresAt.getTime() - Date.now();
+  if (diffMs <= 0) {
+    return { eligible: false, daysLeft: 0, expiresAt };
+  }
+  const daysLeft = Math.max(1, Math.ceil(diffMs / (24 * 60 * 60 * 1000)));
+  return { eligible: true, daysLeft, expiresAt };
+}
+
+export function buildWhatsAppOrderShareUrl(order: Order, recipientPhone?: string): string {
+  const itemsSubtotal =
+    typeof order.subtotal === 'number'
+      ? order.subtotal
+      : order.items.reduce((sum, it) => sum + Number(it.price) * Number(it.quantity), 0);
+  const couponDiscount = Math.max(0, Number(order.couponDiscount || 0));
+  const deliveryFee = Math.max(0, Number(order.deliveryFee || 0));
+  const platformFee = Math.max(0, Number(order.platformFee || 0));
+  const grandTotal = Number(order.total_amount ?? order.total ?? 0);
+
+  const lines: string[] = [
+    `*Smart Basket — Order & Invoice Summary*`,
+    `Order ID: #${order.id}`,
+    `Invoice No: INV-SB-${order.id}`,
+    `Status: ${getOrderStatusLabel(order.status)}`,
+    `Placed On: ${new Date(order.created_at).toLocaleString('en-IN', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    })}`,
+    ``,
+    `*Items Ordered:*`,
+    ...order.items.map(
+      (it, idx) =>
+        `${idx + 1}. ${it.product_name} × ${it.quantity} — ${formatINR(it.price * it.quantity)}`
+    ),
+    ``,
+    `*Bill Summary:*`,
+    `Items Subtotal: ${formatINR(itemsSubtotal)}`,
+  ];
+
+  if (couponDiscount > 0) {
+    lines.push(
+      `Promo (${order.couponCode || 'DISCOUNT'}): -${formatINR(couponDiscount)}`
+    );
+  }
+  lines.push(`Delivery Charge: ${deliveryFee > 0 ? formatINR(deliveryFee) : 'FREE'}`);
+  if (platformFee > 0) {
+    lines.push(`Platform Fee: ${formatINR(platformFee)}`);
+  }
+  lines.push(`*Total Payable: ${formatINR(grandTotal)}*`);
+  lines.push(`Payment: ${order.paymentMethod || 'Cash on Delivery'}`);
+
+  if (order.deliveryBoyName) {
+    lines.push(
+      `Delivery Partner: ${order.deliveryBoyName}${
+        order.deliveryBoyPhone ? ` (${order.deliveryBoyPhone})` : ''
+      }`
+    );
+  } else if (order.courierName || order.trackingId) {
+    lines.push(
+      `Courier: ${order.courierName || 'Partner'}${
+        order.trackingId ? ` · AWB: ${order.trackingId}` : ''
+      }`
+    );
+  }
+
+  lines.push(``, `*Deliver To:*`, `${order.name} (${order.phone})`, `${order.address}`);
+
+  const text = encodeURIComponent(lines.join('\n'));
+  const cleanPhone = (recipientPhone || '').replace(/\D/g, '');
+  if (cleanPhone.length === 10) {
+    return `https://wa.me/91${cleanPhone}?text=${text}`;
+  }
+  if (cleanPhone.length > 10) {
+    return `https://wa.me/${cleanPhone}?text=${text}`;
+  }
+  return `https://wa.me/?text=${text}`;
+}
+
 

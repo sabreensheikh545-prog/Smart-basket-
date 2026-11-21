@@ -95,6 +95,7 @@ const KEYS = {
   deliverySettings: 'qk_delivery_settings_v1',
   promoCodes: 'qk_promo_codes_v1',
   reviews: 'qk_reviews_v1',
+  recentlyViewed: 'qk_recently_viewed_v1',
 };
 
 export function resolveAssetImage(imageValue?: string): string {
@@ -706,13 +707,22 @@ export function placeOrderLocal(payload: {
   return { success: true, message: `Order #${nextOrderId} placed successfully!`, order: newOrder };
 }
 
-export function cancelOrderLocal(orderId: number, userId: number): { success: boolean; message: string } {
+export function cancelOrderLocal(
+  orderId: number,
+  userId: number,
+  cancelReason?: string
+): { success: boolean; message: string } {
   const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
   const ord = orders.find((o) => o.id === orderId && o.user_id === userId);
-  if (!ord || (ord.status !== 'Placed' && ord.status !== 'Confirmed')) {
-    return { success: false, message: 'Only newly confirmed orders can be cancelled.' };
+  if (
+    !ord ||
+    !['Placed', 'Confirmed', 'Packed', 'Shipped', 'Dispatched'].includes(ord.status)
+  ) {
+    return { success: false, message: 'Orders that are Out for Delivery or Delivered cannot be cancelled.' };
   }
   ord.status = 'Cancelled';
+  ord.cancelReason = (cancelReason || '').trim() || ord.cancelReason;
+  ord.cancelledAt = new Date().toISOString();
   writeJSON(KEYS.orders, orders);
   return { success: true, message: `Order #${ord.id} cancelled.` };
 }
@@ -864,11 +874,26 @@ export function restoreProductStockLocal(
   return updated;
 }
 
-export function updateOrderStatusLocal(orderId: number, status: Order['status']): { success: boolean; message: string } {
+export function updateOrderStatusLocal(
+  orderId: number,
+  status: Order['status'],
+  extra?: { cancelReason?: string }
+): { success: boolean; message: string } {
   const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
   const ord = orders.find((o) => o.id === orderId);
   if (!ord) return { success: false, message: 'Order not found.' };
+  const nowIso = new Date().toISOString();
   ord.status = status;
+  if (status === 'Packed' && !ord.packedAt) ord.packedAt = nowIso;
+  if ((status === 'Shipped' || status === 'Dispatched') && !ord.shippedAt) ord.shippedAt = nowIso;
+  if (status === 'Out for Delivery' && !ord.deliveryOutForDeliveryAt) ord.deliveryOutForDeliveryAt = nowIso;
+  if (status === 'Delivered' && !ord.deliveredAt) ord.deliveredAt = nowIso;
+  if (status === 'Return Approved' && !ord.returnApprovedAt) ord.returnApprovedAt = nowIso;
+  if (status === 'Refunded' && !ord.refundedAt) ord.refundedAt = nowIso;
+  if (status === 'Cancelled') {
+    ord.cancelledAt = ord.cancelledAt || nowIso;
+    if (extra?.cancelReason) ord.cancelReason = extra.cancelReason;
+  }
   writeJSON(KEYS.orders, orders);
   return { success: true, message: `Order #${ord.id} updated to ${status}.` };
 }
@@ -886,7 +911,15 @@ export function updateOrderTrackingLocal(
   const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
   const ord = orders.find((o) => o.id === orderId);
   if (!ord) return { success: false, message: 'Order not found locally.' };
+  const nowIso = new Date().toISOString();
   ord.status = payload.status;
+  if (payload.status === 'Packed' && !ord.packedAt) ord.packedAt = nowIso;
+  if ((payload.status === 'Shipped' || payload.status === 'Dispatched') && !ord.shippedAt) ord.shippedAt = nowIso;
+  if (payload.status === 'Out for Delivery' && !ord.deliveryOutForDeliveryAt) ord.deliveryOutForDeliveryAt = nowIso;
+  if (payload.status === 'Delivered' && !ord.deliveredAt) ord.deliveredAt = nowIso;
+  if (payload.status === 'Return Approved' && !ord.returnApprovedAt) ord.returnApprovedAt = nowIso;
+  if (payload.status === 'Refunded' && !ord.refundedAt) ord.refundedAt = nowIso;
+  if (payload.status === 'Cancelled' && !ord.cancelledAt) ord.cancelledAt = nowIso;
   ord.courierName = (payload.courierName || '').trim() || undefined;
   ord.trackingId = (payload.trackingId || '').trim() || undefined;
   ord.trackingUrl = (payload.trackingUrl || '').trim() || undefined;
@@ -900,6 +933,8 @@ export function requestOrderReturnLocal(
   payload: {
     returnReason: string;
     returnResolution?: 'Return' | 'Replace';
+    returnProofPhoto?: string;
+    returnRequestId?: string;
   }
 ): { success: boolean; message: string; order?: Order } {
   const orders = readJSON<Order[]>(KEYS.orders, DEFAULT_ORDERS);
@@ -909,6 +944,8 @@ export function requestOrderReturnLocal(
   ord.returnReason = payload.returnReason.trim();
   ord.returnResolution = payload.returnResolution || 'Return';
   ord.returnRequestedAt = new Date().toISOString();
+  if (payload.returnProofPhoto) ord.returnProofPhoto = payload.returnProofPhoto;
+  if (payload.returnRequestId) ord.returnRequestId = payload.returnRequestId;
   writeJSON(KEYS.orders, orders);
   return {
     success: true,
@@ -2172,4 +2209,21 @@ export function verifyAndDeliverOrderLocal(
     codCollected,
   };
 }
+
+export function getRecentlyViewedIdsLocal(): number[] {
+  const raw = readJSON<number[]>(KEYS.recentlyViewed, []);
+  return Array.isArray(raw) ? raw.filter((n) => typeof n === 'number' && Number.isFinite(n)) : [];
+}
+
+export function recordRecentlyViewedLocal(productId: number): number[] {
+  const existing = getRecentlyViewedIdsLocal().filter((id) => id !== productId);
+  const next = [productId, ...existing].slice(0, 12);
+  writeJSON(KEYS.recentlyViewed, next);
+  return next;
+}
+
+export function clearRecentlyViewedLocal(): void {
+  writeJSON(KEYS.recentlyViewed, []);
+}
+
 

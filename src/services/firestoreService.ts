@@ -80,7 +80,9 @@ import {
   User,
   extractPincodeFromAddress,
   generateDeliveryOtp,
+  getReturnWindowInfo,
   isOnlinePaidOrder,
+  isOrderCancellable,
   normalizeSellerStatus,
 } from '../types';
 import {
@@ -207,6 +209,14 @@ function mapOrderDoc(id: string, data: Record<string, unknown>): Order {
     returnReason: typeof data.returnReason === 'string' && data.returnReason.trim() ? data.returnReason.trim() : undefined,
     returnResolution: data.returnResolution === 'Replace' ? 'Replace' : data.returnResolution === 'Return' ? 'Return' : undefined,
     returnRequestedAt: typeof data.returnRequestedAt === 'string' ? data.returnRequestedAt : undefined,
+    returnProofPhoto: typeof data.returnProofPhoto === 'string' && data.returnProofPhoto.trim() ? data.returnProofPhoto : undefined,
+    returnRequestId: typeof data.returnRequestId === 'string' && data.returnRequestId.trim() ? data.returnRequestId : undefined,
+    returnApprovedAt: typeof data.returnApprovedAt === 'string' ? data.returnApprovedAt : undefined,
+    refundedAt: typeof data.refundedAt === 'string' ? data.refundedAt : undefined,
+    cancelReason: typeof data.cancelReason === 'string' && data.cancelReason.trim() ? data.cancelReason.trim() : undefined,
+    cancelledAt: typeof data.cancelledAt === 'string' ? data.cancelledAt : undefined,
+    packedAt: typeof data.packedAt === 'string' ? data.packedAt : undefined,
+    shippedAt: typeof data.shippedAt === 'string' ? data.shippedAt : undefined,
     created_at: String(data.created_at || data.createdAt || new Date().toISOString()),
     items,
     sellerIds,
@@ -1044,13 +1054,36 @@ export function subscribeAllOrdersFirestore(
   );
 }
 
+function buildOrderStatusTimestampPatch(
+  order: Order,
+  status: Order['status'],
+  nowIso: string
+): Record<string, unknown> {
+  const patch: Record<string, unknown> = {
+    status,
+    updatedAt: nowIso,
+  };
+  if (status === 'Packed' && !order.packedAt) patch.packedAt = nowIso;
+  if ((status === 'Shipped' || status === 'Dispatched') && !order.shippedAt) patch.shippedAt = nowIso;
+  if (status === 'Out for Delivery' && !order.deliveryOutForDeliveryAt) {
+    patch.deliveryOutForDeliveryAt = nowIso;
+  }
+  if (status === 'Delivered' && !order.deliveredAt) patch.deliveredAt = nowIso;
+  if (status === 'Return Approved' && !order.returnApprovedAt) patch.returnApprovedAt = nowIso;
+  if (status === 'Refunded' && !order.refundedAt) patch.refundedAt = nowIso;
+  if (status === 'Cancelled' && !order.cancelledAt) patch.cancelledAt = nowIso;
+  return patch;
+}
+
 export async function updateOrderStatusFirestore(
   order: Order,
-  status: Order['status']
+  status: Order['status'],
+  extra?: { cancelReason?: string }
 ): Promise<{ success: boolean; message: string }> {
   const prevStatus = order.status;
+  const nowIso = new Date().toISOString();
   // Always sync localStore immediately as well
-  updateOrderStatusLocal(order.id, status);
+  updateOrderStatusLocal(order.id, status, extra);
 
   const willRestoreStock = shouldRestoreStockOnTransition(prevStatus, status, order.stockRestored);
 
@@ -1062,10 +1095,24 @@ export async function updateOrderStatusFirestore(
     return { success: true, message: `Order #${order.id} updated to ${status}.` };
   }
   try {
-    await updateDoc(doc(db, 'orders', docId), {
-      status,
-      updatedAt: new Date().toISOString(),
-    });
+    const patch = buildOrderStatusTimestampPatch(order, status, nowIso);
+    if (status === 'Cancelled' && extra?.cancelReason) {
+      patch.cancelReason = extra.cancelReason.trim();
+    }
+    await updateDoc(doc(db, 'orders', docId), patch);
+
+    // Sync linked structured return_requests document if present
+    if (order.returnRequestId && (status === 'Return Approved' || status === 'Refunded')) {
+      setDoc(
+        doc(db, 'return_requests', order.returnRequestId),
+        {
+          status: status === 'Refunded' ? 'Refunded' : 'Approved',
+          updatedAt: nowIso,
+        },
+        { merge: true }
+      ).catch(() => {});
+    }
+
     if (willRestoreStock) {
       await restoreOrderStockFirestore(order);
     }
@@ -1091,6 +1138,7 @@ export async function updateOrderTrackingFirestore(
   }
 ): Promise<{ success: boolean; message: string }> {
   const prevStatus = order.status;
+  const nowIso = new Date().toISOString();
   const cleanCourier = (payload.courierName || '').trim();
   const cleanTrackingId = (payload.trackingId || '').trim();
   const cleanTrackingUrl = (payload.trackingUrl || '').trim();
@@ -1114,14 +1162,24 @@ export async function updateOrderTrackingFirestore(
     return { success: true, message: `Live tracking updated for Order #${order.id}.` };
   }
   try {
+    const patch = buildOrderStatusTimestampPatch(order, payload.status, nowIso);
     await updateDoc(doc(db, 'orders', docId), {
-      status: payload.status,
+      ...patch,
       courierName: cleanCourier,
       trackingId: cleanTrackingId,
       trackingUrl: cleanTrackingUrl,
       trackingNote: cleanTrackingNote,
-      updatedAt: new Date().toISOString(),
     });
+    if (order.returnRequestId && (payload.status === 'Return Approved' || payload.status === 'Refunded')) {
+      setDoc(
+        doc(db, 'return_requests', order.returnRequestId),
+        {
+          status: payload.status === 'Refunded' ? 'Refunded' : 'Approved',
+          updatedAt: nowIso,
+        },
+        { merge: true }
+      ).catch(() => {});
+    }
     if (willRestoreStock) {
       await restoreOrderStockFirestore(order);
     }
@@ -1141,55 +1199,107 @@ export async function requestOrderReturnFirestore(
   payload: {
     returnReason: string;
     returnResolution?: 'Return' | 'Replace';
+    returnProofPhoto?: string;
   }
-): Promise<{ success: boolean; message: string }> {
+): Promise<{ success: boolean; message: string; returnRequestId?: string }> {
   const cleanReason = payload.returnReason.trim();
   if (!cleanReason) {
     return { success: false, message: 'Please select a reason for your return or replacement request.' };
   }
+  const win = getReturnWindowInfo(order);
+  if (!win.eligible) {
+    return {
+      success: false,
+      message: 'This order is outside the 7-day post-delivery return window.',
+    };
+  }
   const resolution = payload.returnResolution || 'Return';
   const nowIso = new Date().toISOString();
+  const returnRequestId = `RET-${order.id}-${Date.now().toString(36).toUpperCase()}`;
+  const cleanPhoto = (payload.returnProofPhoto || '').trim();
 
   // Always update localStore immediately
   requestOrderReturnLocal(order.id, {
     returnReason: cleanReason,
     returnResolution: resolution,
+    returnProofPhoto: cleanPhoto || undefined,
+    returnRequestId,
   });
 
   const docId = order.docId;
   if (!docId) {
     return {
       success: true,
-      message: `${resolution} request submitted for Order #${order.id}. Our team will review it within 24 hours.`,
+      returnRequestId,
+      message: `${resolution} request submitted for Order #${order.id}. Admin/Seller will review it within 24 hours.`,
     };
   }
   try {
-    await updateDoc(doc(db, 'orders', docId), {
+    const orderPatch: Record<string, unknown> = {
       status: 'Return Requested',
       returnReason: cleanReason,
       returnResolution: resolution,
       returnRequestedAt: nowIso,
+      returnRequestId,
       updatedAt: nowIso,
-    });
+    };
+    if (cleanPhoto) {
+      orderPatch.returnProofPhoto = cleanPhoto;
+    }
+
+    await updateDoc(doc(db, 'orders', docId), orderPatch);
+
+    // Create structured return request record in Firestore `return_requests` collection
+    await setDoc(doc(db, 'return_requests', returnRequestId), {
+      id: returnRequestId,
+      orderId: order.id,
+      orderDocId: docId,
+      userId: order.userId || String(order.user_id),
+      customerName: order.name,
+      customerPhone: order.phone,
+      resolution,
+      reason: cleanReason,
+      proofPhoto: cleanPhoto || null,
+      status: 'Pending',
+      sellerIds: order.sellerIds || [],
+      sellerEmails: order.sellerEmails || [],
+      items: order.items,
+      totalAmount: Number(order.total_amount ?? order.total ?? 0),
+      created_at: nowIso,
+      updatedAt: nowIso,
+    }).catch(() => {});
+
     return {
       success: true,
-      message: `${resolution} request submitted for Order #${order.id}. Our team will review it within 24 hours.`,
+      returnRequestId,
+      message: `${resolution} request #${returnRequestId} submitted for Order #${order.id}. Admin/Seller will review it within 24 hours.`,
     };
   } catch (err) {
     return {
       success: true,
+      returnRequestId,
       message: `${resolution} request saved locally for Order #${order.id} (${getFirestoreErrorMessage(err)}).`,
     };
   }
 }
 
-export async function cancelOrderFirestore(order: Order): Promise<{ success: boolean; message: string }> {
-  if (order.status !== 'Placed' && order.status !== 'Confirmed') {
-    return { success: false, message: 'Only newly confirmed orders can be cancelled.' };
+export async function cancelOrderFirestore(
+  order: Order,
+  cancelReason?: string
+): Promise<{ success: boolean; message: string }> {
+  if (!isOrderCancellable(order)) {
+    return {
+      success: false,
+      message: 'Orders that are already Out for Delivery or Delivered cannot be cancelled.',
+    };
   }
-  const res = await updateOrderStatusFirestore(order, 'Cancelled');
+  const cleanReason = (cancelReason || '').trim() || 'Cancelled by customer';
+  const res = await updateOrderStatusFirestore(order, 'Cancelled', { cancelReason: cleanReason });
   if (!res.success) return res;
-  return { success: true, message: `Order #${order.id} cancelled and item stock restored.` };
+  return {
+    success: true,
+    message: `Order #${order.id} cancelled (${cleanReason}) and item stock restored.`,
+  };
 }
 
 export function subscribeAllSellersFirestore(

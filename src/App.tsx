@@ -14,8 +14,11 @@ import {
 } from 'firebase/auth';
 import { AddressBookModal } from './components/AddressBookModal';
 import { AdminView } from './components/AdminView';
+import { CancelOrderModal } from './components/CancelOrderModal';
 import { CategoriesView } from './components/CategoriesView';
 import { FirstLaunchAuthScreen } from './components/FirstLaunchAuthScreen';
+import { OrderDetailsView } from './components/OrderDetailsView';
+import { ReturnRequestModal } from './components/ReturnRequestModal';
 import { RiderView } from './components/RiderView';
 import { SellerView } from './components/SellerView';
 import { TaxInvoiceModal } from './components/TaxInvoiceModal';
@@ -44,15 +47,18 @@ import {
 } from './services/firestoreService';
 import {
   ASSETS,
+  clearRecentlyViewedLocal,
   getBootstrapData,
   getDeliverySettingsLocal,
   getPromoCodesLocal,
+  getRecentlyViewedIdsLocal,
   getReviewsLocal,
   getSavedAddressLocal,
   getSavedAddressesLocal,
   getStoredCurrentRider,
   getStoredSellersLocal,
   getWishlistIdsLocal,
+  recordRecentlyViewedLocal,
   saveCart,
   saveStructuredAddressLocal,
   setStoredCurrentRider,
@@ -71,10 +77,10 @@ import {
   Product,
   ProductReview,
   PromoCode,
-  RETURN_REASONS,
   SavedAddress,
   SellerProfile,
   User,
+  buildWhatsAppOrderShareUrl,
   calculatePromoDiscount,
   formatINR,
   formatSavedAddressLine,
@@ -84,6 +90,8 @@ import {
   getOrderDeliveryStage,
   getOrderStatusLabel,
   getOrderStepIndex,
+  getReturnWindowInfo,
+  isOrderCancellable,
   normalizeSellerStatus,
 } from './types';
 
@@ -96,7 +104,7 @@ const ONBOARDED_STORAGE_KEY = 'smart_basket_onboarded';
 const DEFAULT_DELIVERY_PINCODE = '110039';
 const DEFAULT_DELIVERY_LABEL = 'Bawana, Delhi - 110039';
 
-type UserPage = 'home' | 'categories' | 'play' | 'shop' | 'detail' | 'cart' | 'checkout' | 'orders' | 'profile' | 'login';
+type UserPage = 'home' | 'categories' | 'play' | 'shop' | 'detail' | 'cart' | 'checkout' | 'orders' | 'order_detail' | 'profile' | 'login';
 
 interface ModalConfig {
   open: boolean;
@@ -182,6 +190,7 @@ export default function App() {
   const [detailSlideIdx, setDetailSlideIdx] = useState(0);
   const [detailQty, setDetailQty] = useState(1);
   const [wishlistIds, setWishlistIds] = useState<number[]>(() => getWishlistIdsLocal());
+  const [recentlyViewedIds, setRecentlyViewedIds] = useState<number[]>(() => getRecentlyViewedIdsLocal());
   const [deliveryPincode, setDeliveryPincode] = useState<string>(() => {
     const saved = getSavedAddressLocal();
     return saved?.pincode || DEFAULT_DELIVERY_PINCODE;
@@ -262,15 +271,14 @@ export default function App() {
   });
   const [paymentMethod, setPaymentMethod] = useState<'Online Payment' | 'Cash on Delivery'>('Online Payment');
   
-  // Orders View, Return/Replace Request & Legal Policy Modals
+  // Orders View, Order Details, Cancel & 7-Day Return Request Modals
   const [orderTab, setOrderTab] = useState<'active' | 'history'>('active');
+  const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
   const [expandedOrderIds, setExpandedOrderIds] = useState<number[]>([]);
   const [copiedTrackingOrderId, setCopiedTrackingOrderId] = useState<number | null>(null);
   const [copiedOtpOrderId, setCopiedOtpOrderId] = useState<number | null>(null);
+  const [cancelModalOrder, setCancelModalOrder] = useState<Order | null>(null);
   const [returnModalOrder, setReturnModalOrder] = useState<Order | null>(null);
-  const [returnReasonDraft, setReturnReasonDraft] = useState<string>(RETURN_REASONS[0]);
-  const [returnResolutionDraft, setReturnResolutionDraft] = useState<'Return' | 'Replace'>('Return');
-  const [returnExtraNote, setReturnExtraNote] = useState<string>('');
   const [activeLegalPolicy, setActiveLegalPolicy] = useState<LegalPolicyKey | null>(null);
   const [supportEmailCopied, setSupportEmailCopied] = useState(false);
 
@@ -1268,13 +1276,86 @@ export default function App() {
     [userOrders]
   );
 
+  const selectedOrder = useMemo(
+    () =>
+      userOrders.find((o) => o.id === selectedOrderId) ||
+      orders.find((o) => o.id === selectedOrderId) ||
+      null,
+    [userOrders, orders, selectedOrderId]
+  );
+
+  const recentlyViewedProducts = useMemo(
+    () =>
+      recentlyViewedIds
+        .map((id) => publicProducts.find((p) => p.id === id))
+        .filter((p): p is Product => Boolean(p)),
+    [recentlyViewedIds, publicProducts]
+  );
+
+  const openOrderDetail = (ord: Order) => {
+    setSelectedOrderId(ord.id);
+    setPage('order_detail');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   const openProductDetail = (prod: Product) => {
     setSelectedProductId(prod.id);
     setDetailSlideIdx(0);
     setDetailQty(1);
     setEditingPincode(false);
+    setRecentlyViewedIds(recordRecentlyViewedLocal(prod.id));
     setPage('detail');
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleBuyAgain = (ord: Order) => {
+    const addedNames: string[] = [];
+    const skippedNames: string[] = [];
+
+    setCart((prev) => {
+      let nextCart = [...prev];
+      ord.items.forEach((it) => {
+        const liveProd =
+          publicProducts.find((p) => p.id === it.product_id) ||
+          products.find((p) => p.id === it.product_id);
+        if (!liveProd || liveProd.stock <= 0) {
+          skippedNames.push(it.product_name);
+          return;
+        }
+        const desiredQty = Math.max(1, Math.min(liveProd.stock, Math.floor(Number(it.quantity) || 1)));
+        const existingIdx = nextCart.findIndex((c) => c.product.id === liveProd.id);
+        if (existingIdx !== -1) {
+          const mergedQty = Math.min(liveProd.stock, nextCart[existingIdx].quantity + desiredQty);
+          nextCart[existingIdx] = { product: liveProd, quantity: mergedQty };
+        } else {
+          nextCart.push({ product: liveProd, quantity: desiredQty });
+        }
+        addedNames.push(liveProd.name);
+      });
+      if (addedNames.length > 0) {
+        saveCart(nextCart);
+      }
+      return nextCart;
+    });
+
+    if (addedNames.length === 0) {
+      showModal({
+        title: 'Items Out of Stock',
+        message: 'None of the items from this order are currently in stock.',
+        type: 'error',
+      });
+      return;
+    }
+
+    setPage('cart');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+    if (skippedNames.length > 0) {
+      showModal({
+        title: 'Added Available Items to Cart',
+        message: `${addedNames.length} in-stock item(s) added to your Cart. Out of stock & skipped: ${skippedNames.join(', ')}.`,
+        type: 'info',
+      });
+    }
   };
 
   const addToCart = (prod: Product, qty = 1, buyNow = false) => {
@@ -1679,20 +1760,46 @@ export default function App() {
   };
   
   const handleCancelOrder = (ord: Order) => {
-    showModal({
-      title: `Cancel Order #${ord.id}`,
-      message: 'Are you sure you want to cancel this order?',
-      type: 'info',
-      confirmText: 'Yes, Cancel',
-      onConfirm: async () => {
-        showLoader('Cancelling...');
-        const res = await cancelOrderFirestore(ord);
-        hideLoader();
-        if (!res.success) {
-          showModal({ title: 'Notice', message: res.message, type: 'error' });
-        }
-      },
-    });
+    if (!isOrderCancellable(ord)) {
+      showModal({
+        title: 'Cannot Cancel Order',
+        message: 'Orders that are already Out for Delivery or Delivered cannot be cancelled.',
+        type: 'error',
+      });
+      return;
+    }
+    setCancelModalOrder(ord);
+  };
+
+  const handleConfirmCancelOrder = async (ord: Order, reason: string) => {
+    showLoader('Cancelling order & restoring stock...');
+    const res = await cancelOrderFirestore(ord, reason);
+    hideLoader();
+    if (res.success) {
+      const nowIso = new Date().toISOString();
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === ord.id
+            ? {
+                ...o,
+                status: 'Cancelled',
+                cancelReason: reason,
+                cancelledAt: nowIso,
+                stockRestored: true,
+              }
+            : o
+        )
+      );
+      setCancelModalOrder(null);
+      refreshLocalSession();
+      showModal({
+        title: `Order #${ord.id} Cancelled`,
+        message: res.message,
+        type: 'success',
+      });
+    } else {
+      showModal({ title: 'Notice', message: res.message, type: 'error' });
+    }
   };
 
   const handleProfileSave = async (e: React.FormEvent) => {
@@ -1911,34 +2018,42 @@ export default function App() {
   };
 
   const openReturnModal = (ord: Order) => {
+    const win = getReturnWindowInfo(ord);
+    if (!win.eligible) {
+      showModal({
+        title: 'Return Window Closed',
+        message: 'Returns and replacements can only be requested within 7 days of delivery.',
+        type: 'error',
+      });
+      return;
+    }
     setReturnModalOrder(ord);
-    setReturnReasonDraft(RETURN_REASONS[0]);
-    setReturnResolutionDraft('Return');
-    setReturnExtraNote('');
   };
 
-  const handleSubmitReturnRequest = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!returnModalOrder) return;
-    const combinedReason = returnExtraNote.trim()
-      ? `${returnReasonDraft} — ${returnExtraNote.trim()}`
-      : returnReasonDraft;
+  const handleSubmitReturnRequest = async (
+    ord: Order,
+    payload: {
+      returnReason: string;
+      returnResolution: 'Return' | 'Replace';
+      returnProofPhoto?: string;
+    }
+  ) => {
     showLoader('Submitting return request...');
-    const res = await requestOrderReturnFirestore(returnModalOrder, {
-      returnReason: combinedReason,
-      returnResolution: returnResolutionDraft,
-    });
+    const res = await requestOrderReturnFirestore(ord, payload);
     hideLoader();
     if (res.success) {
+      const nowIso = new Date().toISOString();
       setOrders((prev) =>
         prev.map((o) =>
-          o.id === returnModalOrder.id
+          o.id === ord.id
             ? {
                 ...o,
                 status: 'Return Requested',
-                returnReason: combinedReason,
-                returnResolution: returnResolutionDraft,
-                returnRequestedAt: new Date().toISOString(),
+                returnReason: payload.returnReason,
+                returnResolution: payload.returnResolution,
+                returnProofPhoto: payload.returnProofPhoto || o.returnProofPhoto,
+                returnRequestId: res.returnRequestId || o.returnRequestId,
+                returnRequestedAt: nowIso,
               }
             : o
         )
@@ -1946,7 +2061,7 @@ export default function App() {
       setReturnModalOrder(null);
       refreshLocalSession();
       showModal({
-        title: `${returnResolutionDraft} Request Submitted`,
+        title: `${payload.returnResolution} Request Submitted`,
         message: res.message,
         type: 'success',
       });
@@ -1965,10 +2080,13 @@ export default function App() {
       ord.status === 'Return Approved' ||
       ord.status === 'Refunded';
     const isExpanded = expandedOrderIds.includes(ord.id);
-    const canCancel = ord.status === 'Placed' || ord.status === 'Confirmed';
-    const canRequestReturn = ord.status === 'Delivered';
+    const canCancel = isOrderCancellable(ord);
+    const returnWin = getReturnWindowInfo(ord);
+    const canRequestReturn = returnWin.eligible;
+    const isDelivered = ord.status === 'Delivered';
     const liveTrackUrl = getCourierTrackingUrl(ord.courierName, ord.trackingId, ord.trackingUrl);
     const hasCourierInfo = Boolean(ord.courierName || ord.trackingId || ord.trackingNote || liveTrackUrl);
+    const whatsappShareUrl = buildWhatsAppOrderShareUrl(ord);
 
     const progressPercent =
       stepIdx <= 1
@@ -1991,7 +2109,11 @@ export default function App() {
 
     return (
       <div key={ord.docId || ord.id} className="bg-white rounded-xl border border-slate-200/80 shadow-xs overflow-hidden">
-        <div className="p-4 flex items-center gap-3.5">
+        <button
+          type="button"
+          onClick={() => openOrderDetail(ord)}
+          className="w-full p-4 flex items-center gap-3.5 text-left hover:bg-slate-50/70 transition group"
+        >
           <img
             src={firstItem?.product_image || ASSETS.smartphone}
             alt={firstItem?.product_name || 'Order'}
@@ -2034,7 +2156,7 @@ export default function App() {
                 <span>{getOrderStatusLabel(ord.status)}</span>
               </span>
             </div>
-            <h3 className="mt-0.5 text-sm font-bold text-slate-900 truncate">
+            <h3 className="mt-0.5 text-sm font-bold text-slate-900 truncate group-hover:text-[#2874F0] transition">
               {firstItem?.product_name || 'Smart Basket Order'}
               {extraCount > 0 ? ` + ${extraCount} more` : ''}
             </h3>
@@ -2042,16 +2164,19 @@ export default function App() {
               <span className="text-sm font-extrabold text-slate-900 font-mono tabular-nums">
                 {formatINR(ord.total_amount)}
               </span>
-              <span className="text-[11px] text-slate-500">
-                {new Date(ord.created_at).toLocaleDateString('en-IN', {
-                  day: '2-digit',
-                  month: 'short',
-                  year: 'numeric',
-                })}
+              <span className="text-[11px] text-slate-500 inline-flex items-center gap-1.5">
+                <span>
+                  {new Date(ord.created_at).toLocaleDateString('en-IN', {
+                    day: '2-digit',
+                    month: 'short',
+                    year: 'numeric',
+                  })}
+                </span>
+                <i className="fa-solid fa-chevron-right text-[10px] text-slate-400 group-hover:text-[#2874F0]"></i>
               </span>
             </div>
           </div>
-        </div>
+        </button>
 
         {/* 5-Step Visual Progress Tracker highlighted in Green up to current status */}
         {!isCancelled ? (
@@ -2314,7 +2439,15 @@ export default function App() {
         )}
 
         <div className="px-4 py-2.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 bg-white">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => openOrderDetail(ord)}
+              className="text-xs font-extrabold text-[#2874F0] hover:underline flex items-center gap-1"
+            >
+              <i className="fa-solid fa-route text-[11px]"></i>
+              <span>Track &amp; Details</span>
+            </button>
             <button
               type="button"
               onClick={() =>
@@ -2322,10 +2455,10 @@ export default function App() {
                   prev.includes(ord.id) ? prev.filter((x) => x !== ord.id) : [...prev, ord.id]
                 )
               }
-              className="text-xs font-bold text-[#2874F0] hover:underline flex items-center gap-1.5"
+              className="text-xs font-semibold text-slate-500 hover:text-slate-800 flex items-center gap-1"
             >
-              <span>View Details</span>
-              <i className={`fa-solid fa-chevron-down text-[10px] transition-transform ${isExpanded ? 'rotate-180' : ''}`}></i>
+              <span>Summary</span>
+              <i className={`fa-solid fa-chevron-down text-[9px] transition-transform ${isExpanded ? 'rotate-180' : ''}`}></i>
             </button>
             {!isCancelled && (
               <button
@@ -2334,11 +2467,30 @@ export default function App() {
                 className="text-xs font-bold text-slate-600 hover:text-[#2874F0] inline-flex items-center gap-1"
               >
                 <i className="fa-solid fa-file-invoice text-[11px]"></i>
-                <span>Tax Invoice</span>
+                <span>Invoice</span>
               </button>
             )}
+            <a
+              href={whatsappShareUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs font-bold text-[#128C7E] hover:text-[#075E54] inline-flex items-center gap-1"
+            >
+              <i className="fa-brands fa-whatsapp text-sm"></i>
+              <span>WhatsApp</span>
+            </a>
           </div>
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2">
+            {isDelivered && (
+              <button
+                type="button"
+                onClick={() => handleBuyAgain(ord)}
+                className="px-3 py-1.5 rounded-lg bg-[#2874F0] hover:bg-[#1e60d5] text-white text-xs font-extrabold transition inline-flex items-center gap-1.5"
+              >
+                <i className="fa-solid fa-cart-plus text-[11px]"></i>
+                <span>Buy Again</span>
+              </button>
+            )}
             {canRequestReturn && (
               <button
                 type="button"
@@ -2346,14 +2498,14 @@ export default function App() {
                 className="px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 text-xs font-extrabold hover:bg-amber-100 transition inline-flex items-center gap-1.5"
               >
                 <i className="fa-solid fa-rotate-left text-[11px]"></i>
-                <span>Request Return / Replace</span>
+                <span>Return / Replace ({returnWin.daysLeft}d)</span>
               </button>
             )}
             {canCancel && (
               <button
                 type="button"
                 onClick={() => handleCancelOrder(ord)}
-                className="text-xs font-semibold text-rose-600 hover:text-rose-700"
+                className="px-2.5 py-1.5 rounded-lg text-xs font-bold text-rose-600 hover:bg-rose-50 transition"
               >
                 Cancel Order
               </button>
@@ -2970,6 +3122,90 @@ export default function App() {
                   </div>
                 </div>
               </section>
+
+              {/* Recently Viewed Horizontal Row (appears once user opens products) */}
+              {recentlyViewedProducts.length > 0 && (
+                <section className="max-w-7xl mx-auto px-2.5 sm:px-4">
+                  <div className="bg-white rounded-xl border border-slate-200/80 p-3 sm:p-4">
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-2">
+                        <i className="fa-solid fa-clock-rotate-left text-[#2874F0] text-sm"></i>
+                        <h2 className="text-sm sm:text-base font-extrabold text-slate-900">
+                          Recently Viewed
+                        </h2>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          clearRecentlyViewedLocal();
+                          setRecentlyViewedIds([]);
+                        }}
+                        className="text-[11px] font-bold text-slate-500 hover:text-[#2874F0] transition"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    <div className="flex items-stretch gap-2.5 sm:gap-3 overflow-x-auto no-scrollbar pb-1">
+                      {recentlyViewedProducts.map((prod) => {
+                        const mrp = getEffectiveMrp(prod.price, prod.mrp);
+                        const discount = getDiscountPercent(prod.price, mrp);
+                        const stats = productReviewStats.get(prod.id);
+                        const isOutOfStock = prod.stock <= 0;
+                        return (
+                          <button
+                            key={prod.docId || prod.id}
+                            type="button"
+                            onClick={() => openProductDetail(prod)}
+                            className="w-36 sm:w-44 shrink-0 rounded-lg border border-slate-200/80 bg-white hover:border-[#2874F0]/50 hover:shadow-xs overflow-hidden text-left flex flex-col transition group"
+                          >
+                            <div className="relative aspect-square bg-slate-50 p-2 overflow-hidden">
+                              <img
+                                src={prod.image}
+                                alt={prod.name}
+                                referrerPolicy="no-referrer"
+                                className={`w-full h-full object-cover rounded-md group-hover:scale-105 transition duration-200 ${
+                                  isOutOfStock ? 'opacity-50 grayscale' : ''
+                                }`}
+                              />
+                              {isOutOfStock && (
+                                <span className="absolute bottom-2 left-2 right-2 text-center py-0.5 rounded bg-slate-900/85 text-white text-[9px] font-bold">
+                                  Out of Stock
+                                </span>
+                              )}
+                            </div>
+                            <div className="p-2.5 flex-1 flex flex-col">
+                              <p className="text-xs font-semibold text-slate-900 line-clamp-2 leading-snug group-hover:text-[#2874F0]">
+                                {prod.name}
+                              </p>
+                              {stats && stats.count > 0 && (
+                                <div className="mt-1 flex items-center gap-1">
+                                  <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-sm bg-[#388E3C] text-white text-[10px] font-bold leading-none tabular-nums">
+                                    {stats.avg.toFixed(1)}
+                                    <i className="fa-solid fa-star text-[8px]"></i>
+                                  </span>
+                                  <span className="text-[10px] text-slate-400 tabular-nums">
+                                    ({stats.count})
+                                  </span>
+                                </div>
+                              )}
+                              <div className="mt-auto pt-1.5 flex flex-wrap items-baseline gap-x-1.5">
+                                <span className="text-xs sm:text-sm font-extrabold text-slate-900 font-mono tabular-nums">
+                                  {formatINR(prod.price)}
+                                </span>
+                                {discount > 0 && (
+                                  <span className="text-[10px] font-bold text-[#388E3C] tabular-nums">
+                                    {discount}% off
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </section>
+              )}
 
               {/* Deals of the Day — 2-Column Mobile Grid */}
               <section className="max-w-7xl mx-auto px-2.5 sm:px-4">
@@ -4516,6 +4752,26 @@ export default function App() {
             </main>
           )}
 
+          {/* FLIPKART-STANDARD ORDER DETAILS & VERTICAL TRACKING TIMELINE */}
+          {page === 'order_detail' && selectedOrder && (
+            <OrderDetailsView
+              order={selectedOrder}
+              currentUser={currentUser}
+              products={products}
+              allReviews={allReviews}
+              onBack={() => {
+                setPage('orders');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              onOpenProduct={openProductDetail}
+              onOpenInvoice={(ord) => setInvoiceModalOrder(ord)}
+              onOpenCancelModal={handleCancelOrder}
+              onOpenReturnModal={openReturnModal}
+              onBuyAgain={handleBuyAgain}
+              onOpenReview={(target) => setReviewModalTarget(target)}
+            />
+          )}
+
           {/* PROFILE PAGE */}
           {page === 'profile' && currentUser && (
             <main className="max-w-2xl mx-auto px-3 sm:px-4 py-5 space-y-4">
@@ -5175,13 +5431,13 @@ export default function App() {
                 type="button"
                 onClick={() => setPage(currentUser ? 'profile' : 'login')}
                 className={`flex flex-col items-center justify-center h-full transition-colors ${
-                  page === 'profile' || page === 'orders' || page === 'login' ? 'text-[#2874F0]' : 'text-slate-500'
+                  page === 'profile' || page === 'orders' || page === 'order_detail' || page === 'login' ? 'text-[#2874F0]' : 'text-slate-500'
                 }`}
               >
                 <i className="fa-solid fa-user text-base"></i>
                 <span
                   className={`text-[10px] mt-0.5 ${
-                    page === 'profile' || page === 'orders' || page === 'login' ? 'font-extrabold' : 'font-semibold'
+                    page === 'profile' || page === 'orders' || page === 'order_detail' || page === 'login' ? 'font-extrabold' : 'font-semibold'
                   }`}
                 >
                   Account
@@ -5654,119 +5910,19 @@ export default function App() {
         </div>
       )}
 
-      {/* 7-Day Return / Replace Request Modal */}
-      {returnModalOrder && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-slate-900/55 backdrop-blur-xs">
-          <div className="w-full max-w-md rounded-t-2xl sm:rounded-2xl bg-white shadow-2xl border border-slate-200 overflow-hidden max-h-[90vh] flex flex-col">
-            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between shrink-0">
-              <div className="flex items-center gap-2.5">
-                <span className="w-8 h-8 rounded-full bg-amber-50 text-amber-700 flex items-center justify-center">
-                  <i className="fa-solid fa-rotate-left text-xs"></i>
-                </span>
-                <div>
-                  <h3 className="text-base font-extrabold text-slate-900 leading-tight">
-                    Request Return / Replace
-                  </h3>
-                  <p className="text-[11px] text-slate-500">
-                    Order #{returnModalOrder.id} · 7-Day Easy Return Protection
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setReturnModalOrder(null)}
-                aria-label="Close return modal"
-                className="w-8 h-8 rounded-lg text-slate-500 hover:bg-slate-100 flex items-center justify-center"
-              >
-                <i className="fa-solid fa-xmark"></i>
-              </button>
-            </div>
+      {/* Self-Serve Cancel Order Modal with Reason Selection & Stock Restoration */}
+      <CancelOrderModal
+        order={cancelModalOrder}
+        onClose={() => setCancelModalOrder(null)}
+        onConfirmCancel={handleConfirmCancelOrder}
+      />
 
-            <form onSubmit={handleSubmitReturnRequest} className="p-5 space-y-4 overflow-y-auto">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-2">What would you like to do?</label>
-                <div className="grid grid-cols-2 gap-2.5">
-                  {(['Return', 'Replace'] as const).map((opt) => (
-                    <button
-                      key={opt}
-                      type="button"
-                      onClick={() => setReturnResolutionDraft(opt)}
-                      className={`py-2.5 px-3 rounded-xl border text-xs font-extrabold transition flex items-center justify-center gap-1.5 ${
-                        returnResolutionDraft === opt
-                          ? 'bg-blue-50 border-[#2874F0] text-[#2874F0]'
-                          : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
-                      }`}
-                    >
-                      <i className={`fa-solid ${opt === 'Return' ? 'fa-wallet' : 'fa-arrows-rotate'}`}></i>
-                      <span>{opt === 'Return' ? 'Return & Refund' : 'Replace Item'}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-2">Select Reason</label>
-                <div className="space-y-2">
-                  {RETURN_REASONS.map((reason) => (
-                    <label
-                      key={reason}
-                      className={`flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl border cursor-pointer transition text-xs font-semibold ${
-                        returnReasonDraft === reason
-                          ? 'bg-amber-50 border-amber-400 text-amber-950'
-                          : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="returnReason"
-                        value={reason}
-                        checked={returnReasonDraft === reason}
-                        onChange={() => setReturnReasonDraft(reason)}
-                        className="accent-[#2874F0]"
-                      />
-                      <span>{reason}</span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Additional Details <span className="text-slate-400 font-normal">(optional)</span>
-                </label>
-                <textarea
-                  rows={2}
-                  value={returnExtraNote}
-                  onChange={(e) => setReturnExtraNote(e.target.value)}
-                  placeholder="Briefly describe the damage, defect, or mismatch..."
-                  className="w-full p-3 rounded-xl bg-slate-50 border border-slate-300 text-xs text-slate-800 focus:bg-white focus:border-[#2874F0] focus:outline-none"
-                />
-              </div>
-
-              <div className="px-3.5 py-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-[11px] text-emerald-900 leading-relaxed">
-                <i className="fa-solid fa-shield-halved text-[#2E7D32] mr-1.5"></i>
-                Approved refunds are credited to your original payment method within <strong>5–7 business days</strong>.
-              </div>
-
-              <div className="flex items-center justify-end gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={() => setReturnModalOrder(null)}
-                  className="px-4 py-2.5 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2.5 rounded-xl bg-[#FB641B] text-white text-xs font-extrabold hover:bg-[#e55812] transition"
-                >
-                  Submit {returnResolutionDraft} Request
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      {/* 7-Day Return / Replace Request Modal with Live Camera Photo Proof */}
+      <ReturnRequestModal
+        order={returnModalOrder}
+        onClose={() => setReturnModalOrder(null)}
+        onSubmitReturn={handleSubmitReturnRequest}
+      />
 
       {/* Commercial Legal, Policy & Contact Us Modal (Razorpay & Play Store Compliance) */}
       {activeLegalPolicy && (
