@@ -13,9 +13,13 @@ import bigSavingBannerImg from '../assets/images/banner_big_saving_1794941061121
 import {
   CartEntry,
   Category,
+  DEFAULT_DELIVERY_SETTINGS,
   DeliveryBoy,
+  DeliverySettings,
   Order,
   Product,
+  ProductReview,
+  PromoCode,
   RiderCashSettlement,
   RiderKycStatus,
   SavedAddress,
@@ -87,6 +91,10 @@ const KEYS = {
   currentRider: 'qk_current_rider_v3',
   wishlist: 'qk_wishlist_v3',
   savedAddress: 'qk_saved_address_v3',
+  savedAddresses: 'qk_saved_addresses_v4',
+  deliverySettings: 'qk_delivery_settings_v1',
+  promoCodes: 'qk_promo_codes_v1',
+  reviews: 'qk_reviews_v1',
 };
 
 export function resolveAssetImage(imageValue?: string): string {
@@ -127,8 +135,8 @@ export const DEFAULT_PRODUCTS: Product[] = [
     description: '200MP OIS triple camera, 1.5K 120Hz AMOLED display, Snapdragon 7s Gen 2 processor with 67W turbo charging.',
     price: 21999,
     mrp: 28999,
-    rating: 4.4,
-    reviews: 3420,
+    rating: 0,
+    reviews: 0,
     stock: 25,
     image: smartphoneImg,
     created_at: '2026-11-10T10:00:00Z',
@@ -140,8 +148,8 @@ export const DEFAULT_PRODUCTS: Product[] = [
     description: '6000mAh massive battery, 120Hz Super AMOLED display, 50MP no-shake camera, and Gorilla Glass Victus+ protection.',
     price: 16499,
     mrp: 24499,
-    rating: 4.5,
-    reviews: 2180,
+    rating: 0,
+    reviews: 0,
     stock: 18,
     image: smartphoneImg,
     created_at: '2026-11-11T10:00:00Z',
@@ -153,8 +161,8 @@ export const DEFAULT_PRODUCTS: Product[] = [
     description: 'Pure breathable combed cotton casual shirt paired with a tailored classic indigo washed denim jacket.',
     price: 1899,
     mrp: 3999,
-    rating: 4.4,
-    reviews: 1560,
+    rating: 0,
+    reviews: 0,
     stock: 30,
     image: fashionImg,
     created_at: '2026-11-12T10:00:00Z',
@@ -166,8 +174,8 @@ export const DEFAULT_PRODUCTS: Product[] = [
     description: 'Lightweight engineered mesh upper with dual-density cushioned EVA sole for everyday running and gym sessions.',
     price: 1299,
     mrp: 2599,
-    rating: 4.3,
-    reviews: 4890,
+    rating: 0,
+    reviews: 0,
     stock: 35,
     image: sneakersImg,
     created_at: '2026-11-12T14:00:00Z',
@@ -179,8 +187,8 @@ export const DEFAULT_PRODUCTS: Product[] = [
     description: 'Heavy-duty water-repellent canvas daypack with 16-inch padded laptop compartment and ergonomic airflow straps.',
     price: 1199,
     mrp: 2499,
-    rating: 4.5,
-    reviews: 2670,
+    rating: 0,
+    reviews: 0,
     stock: 22,
     image: backpackImg,
     created_at: '2026-11-13T10:00:00Z',
@@ -192,8 +200,8 @@ export const DEFAULT_PRODUCTS: Product[] = [
     description: 'Active Noise Cancellation up to 32dB, 42-hour playback, ENx quad-mic call clarity, and ASAP fast charging.',
     price: 1399,
     mrp: 4490,
-    rating: 4.4,
-    reviews: 8910,
+    rating: 0,
+    reviews: 0,
     stock: 40,
     image: earbudsImg,
     created_at: '2026-11-13T15:00:00Z',
@@ -205,8 +213,8 @@ export const DEFAULT_PRODUCTS: Product[] = [
     description: '1.85-inch vivid AMOLED display, Bluetooth calling, SpO2 & heart rate monitor, and 7-day battery endurance.',
     price: 3499,
     mrp: 6999,
-    rating: 4.5,
-    reviews: 2740,
+    rating: 0,
+    reviews: 0,
     stock: 19,
     image: smartwatchImg,
     created_at: '2026-11-14T10:00:00Z',
@@ -218,8 +226,8 @@ export const DEFAULT_PRODUCTS: Product[] = [
     description: '50-hour battery life, multipoint Bluetooth connection, DSEE audio upscaling, and ultra-soft earpads.',
     price: 4490,
     mrp: 5990,
-    rating: 4.6,
-    reviews: 1840,
+    rating: 0,
+    reviews: 0,
     stock: 14,
     image: heroImg,
     created_at: '2026-11-14T16:00:00Z',
@@ -231,8 +239,8 @@ export const DEFAULT_PRODUCTS: Product[] = [
     description: '1500W rapid boil stainless steel electric kettle with auto shut-off, 360-degree swivel base, and cool-touch handle.',
     price: 949,
     mrp: 1795,
-    rating: 4.4,
-    reviews: 1930,
+    rating: 0,
+    reviews: 0,
     stock: 28,
     image: homeApplianceImg,
     created_at: '2026-11-15T09:00:00Z',
@@ -244,8 +252,8 @@ export const DEFAULT_PRODUCTS: Product[] = [
     description: 'Double-walled 304 stainless steel vacuum flask keeps water chilled for 24 hours and tea/coffee piping hot.',
     price: 799,
     mrp: 1250,
-    rating: 4.6,
-    reviews: 5120,
+    rating: 0,
+    reviews: 0,
     stock: 45,
     image: flaskImg,
     created_at: '2026-11-15T12:00:00Z',
@@ -257,8 +265,8 @@ export const DEFAULT_PRODUCTS: Product[] = [
     description: 'Dermatologist-tested daily glow brightening serum with 10% ethyl ascorbic acid and barrier-repair moisturizer.',
     price: 649,
     mrp: 999,
-    rating: 4.5,
-    reviews: 3210,
+    rating: 0,
+    reviews: 0,
     stock: 32,
     image: beautyImg,
     created_at: '2026-11-16T08:30:00Z',
@@ -270,8 +278,8 @@ export const DEFAULT_PRODUCTS: Product[] = [
     description: 'Premium crunchy California almonds (250g), wild forest raw honey (500g), and organic Darjeeling green tea.',
     price: 749,
     mrp: 1199,
-    rating: 4.6,
-    reviews: 4190,
+    rating: 0,
+    reviews: 0,
     stock: 50,
     image: groceryImg,
     created_at: '2026-11-16T15:45:00Z',
@@ -776,7 +784,7 @@ export function saveProductLocal(payload: {
         description: payload.description.trim(),
         price: payload.price,
         mrp: mrpValue,
-        rating: payload.rating || products[idx].rating || 4.4,
+        rating: payload.rating ?? products[idx].rating ?? 0,
         stock: payload.stock,
         image: payload.image || products[idx].image,
         sellerId: payload.sellerId ?? products[idx].sellerId,
@@ -796,8 +804,8 @@ export function saveProductLocal(payload: {
     description: payload.description.trim(),
     price: payload.price,
     mrp: mrpValue,
-    rating: payload.rating || 4.4,
-    reviews: 120,
+    rating: payload.rating ?? 0,
+    reviews: 0,
     stock: payload.stock,
     image: payload.image || earbudsImg,
     created_at: new Date().toISOString(),
@@ -829,6 +837,27 @@ export function deductProductStockLocal(
     return {
       ...prod,
       stock: Math.max(0, Math.floor(Number(prod.stock) || 0) - deduct),
+    };
+  });
+  writeJSON(KEYS.products, updated);
+  return updated;
+}
+
+export function restoreProductStockLocal(
+  items: { product_id: number; quantity: number }[]
+): Product[] {
+  const products = readJSON<Product[]>(KEYS.products, DEFAULT_PRODUCTS);
+  const qtyById = new Map<number, number>();
+  items.forEach((it) => {
+    const qty = Math.max(1, Math.floor(Number(it.quantity) || 1));
+    qtyById.set(it.product_id, (qtyById.get(it.product_id) || 0) + qty);
+  });
+  const updated = products.map((prod) => {
+    const restore = qtyById.get(prod.id);
+    if (!restore) return prod;
+    return {
+      ...prod,
+      stock: Math.max(0, Math.floor(Number(prod.stock) || 0) + restore),
     };
   });
   writeJSON(KEYS.products, updated);
@@ -985,11 +1014,134 @@ export function saveWishlistIdsLocal(ids: number[]): void {
 }
 
 export function getSavedAddressLocal(): SavedAddress | null {
-  return readJSON<SavedAddress | null>(KEYS.savedAddress, null);
+  const all = getSavedAddressesLocal();
+  if (all.length > 0) {
+    return all.find((a) => a.isDefault) || all[0];
+  }
+  const legacy = readJSON<Partial<SavedAddress> | null>(KEYS.savedAddress, null);
+  if (!legacy || (!legacy.houseStreet && !legacy.city && !legacy.pincode)) return null;
+  return {
+    id: legacy.id || 'addr_default',
+    label: legacy.label || 'Home',
+    name: legacy.name || '',
+    phone: legacy.phone || '',
+    houseStreet: legacy.houseStreet || '',
+    area: legacy.area || '',
+    city: legacy.city || '',
+    state: legacy.state || '',
+    pincode: legacy.pincode || '110039',
+    isDefault: true,
+  };
 }
 
 export function saveStructuredAddressLocal(addr: SavedAddress): void {
   writeJSON(KEYS.savedAddress, addr);
+}
+
+export function getSavedAddressesLocal(): SavedAddress[] {
+  const stored = readJSON<SavedAddress[]>(KEYS.savedAddresses, []);
+  if (Array.isArray(stored) && stored.length > 0) {
+    return stored.map((a, idx) => ({
+      ...a,
+      id: a.id || `addr_${idx + 1}`,
+      label: a.label === 'Work' || a.label === 'Other' ? a.label : 'Home',
+    }));
+  }
+  const legacy = readJSON<Partial<SavedAddress> | null>(KEYS.savedAddress, null);
+  if (legacy && (legacy.houseStreet || legacy.city || legacy.pincode)) {
+    const migrated: SavedAddress = {
+      id: legacy.id || 'addr_home_1',
+      label: legacy.label === 'Work' || legacy.label === 'Other' ? legacy.label : 'Home',
+      name: legacy.name || '',
+      phone: legacy.phone || '',
+      houseStreet: legacy.houseStreet || '',
+      area: legacy.area || '',
+      city: legacy.city || '',
+      state: legacy.state || '',
+      pincode: legacy.pincode || '110039',
+      isDefault: true,
+      updatedAt: new Date().toISOString(),
+    };
+    return [migrated];
+  }
+  return [];
+}
+
+export function saveAddressesLocal(addresses: SavedAddress[]): void {
+  writeJSON(KEYS.savedAddresses, addresses);
+  const chosen = addresses.find((a) => a.isDefault) || addresses[0] || null;
+  if (chosen) {
+    writeJSON(KEYS.savedAddress, chosen);
+  }
+}
+
+export const DEFAULT_PROMO_CODES: PromoCode[] = [
+  {
+    id: 'SMART50',
+    docId: 'SMART50',
+    code: 'SMART50',
+    discountType: 'flat',
+    discountValue: 50,
+    minOrderValue: 299,
+    description: 'Flat ₹50 off on orders of ₹299 & above',
+    active: true,
+    usedCount: 0,
+    created_at: '2026-11-01T10:00:00Z',
+  },
+  {
+    id: 'SAVE10',
+    docId: 'SAVE10',
+    code: 'SAVE10',
+    discountType: 'percent',
+    discountValue: 10,
+    maxDiscount: 500,
+    minOrderValue: 499,
+    description: '10% instant discount up to ₹500 on orders ₹499+',
+    active: true,
+    usedCount: 0,
+    created_at: '2026-11-01T10:05:00Z',
+  },
+];
+
+export function getDeliverySettingsLocal(): DeliverySettings {
+  const stored = readJSON<Partial<DeliverySettings> | null>(KEYS.deliverySettings, null);
+  return {
+    freeDeliveryThreshold:
+      typeof stored?.freeDeliveryThreshold === 'number' && stored.freeDeliveryThreshold >= 0
+        ? stored.freeDeliveryThreshold
+        : DEFAULT_DELIVERY_SETTINGS.freeDeliveryThreshold,
+    deliveryCharge:
+      typeof stored?.deliveryCharge === 'number' && stored.deliveryCharge >= 0
+        ? stored.deliveryCharge
+        : DEFAULT_DELIVERY_SETTINGS.deliveryCharge,
+    platformFee:
+      typeof stored?.platformFee === 'number' && stored.platformFee >= 0
+        ? stored.platformFee
+        : DEFAULT_DELIVERY_SETTINGS.platformFee,
+    updatedAt: stored?.updatedAt,
+  };
+}
+
+export function saveDeliverySettingsLocal(settings: DeliverySettings): void {
+  writeJSON(KEYS.deliverySettings, settings);
+}
+
+export function getPromoCodesLocal(): PromoCode[] {
+  const stored = readJSON<PromoCode[] | null>(KEYS.promoCodes, null);
+  if (!Array.isArray(stored)) return DEFAULT_PROMO_CODES;
+  return stored;
+}
+
+export function savePromoCodesLocal(codes: PromoCode[]): void {
+  writeJSON(KEYS.promoCodes, codes);
+}
+
+export function getReviewsLocal(): ProductReview[] {
+  return readJSON<ProductReview[]>(KEYS.reviews, []);
+}
+
+export function saveReviewsLocal(reviews: ProductReview[]): void {
+  writeJSON(KEYS.reviews, reviews);
 }
 
 export function getSellerByEmailOrUidLocal(email?: string, uid?: string): SellerProfile | null {

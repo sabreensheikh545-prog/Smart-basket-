@@ -663,7 +663,6 @@ export const RiderView: React.FC<RiderViewProps> = ({
                   phone={regPhone}
                   onPhoneChange={setRegPhone}
                   onAvailabilityChange={setRegMobileStatus}
-                  excludeRiderEmail={cleanRegEmail || undefined}
                 />
 
                 {/* Strict India Post 6-Digit Pincode Lookup */}

@@ -4,8 +4,10 @@ import {
   doc,
   getDoc,
   getDocs,
+  increment,
   onSnapshot,
   query,
+  runTransaction,
   setDoc,
   updateDoc,
   where,
@@ -15,6 +17,7 @@ import { db, getFirestoreErrorMessage } from '../firebase';
 import {
   DEFAULT_CATEGORIES,
   DEFAULT_PRODUCTS,
+  DEFAULT_PROMO_CODES,
   assignOrderRiderLocal,
   authenticateDeliveryBoyLocal,
   cacheCategoriesLocal,
@@ -24,19 +27,30 @@ import {
   cacheSellersLocal,
   deductProductStockLocal,
   deleteDeliveryBoyLocal,
+  getDeliverySettingsLocal,
+  getPromoCodesLocal,
+  getReviewsLocal,
+  getSavedAddressesLocal,
   getSellerByEmailOrUidLocal,
   getStoredDeliveryBoysLocal,
   getStoredOrdersLocal,
   getStoredSellersLocal,
+  getWishlistIdsLocal,
   markOrderOutForDeliveryLocal,
   markSellerPayoutPaidLocal,
   recordRiderCodCollectionLocal,
   requestOrderReturnLocal,
   requestSellerPayoutLocal,
   resolveAssetImage,
+  restoreProductStockLocal,
   reviewRiderKycLocal,
+  saveAddressesLocal,
   saveDeliveryBoyLocal,
+  saveDeliverySettingsLocal,
+  savePromoCodesLocal,
+  saveReviewsLocal,
   saveSellerProfileLocal,
+  saveWishlistIdsLocal,
   settleRiderCodCashLocal,
   shipOrderViaCourierLocal,
   submitRiderKycApplicationLocal,
@@ -49,13 +63,18 @@ import {
 } from '../store/localStore';
 import {
   Category,
+  DEFAULT_DELIVERY_SETTINGS,
   DeliveryBoy,
+  DeliverySettings,
   Order,
   OrderItem,
   OrderStatus,
   Product,
+  ProductReview,
+  PromoCode,
   RiderCashSettlement,
   RiderKycStatus,
+  SavedAddress,
   SellerPayoutRecord,
   SellerProfile,
   User,
@@ -104,9 +123,9 @@ function mapProductDoc(id: string, data: Record<string, unknown>): Product {
     description: String(data.description || ''),
     price,
     mrp: mrpRaw && mrpRaw > price ? mrpRaw : undefined,
-    rating: data.rating !== undefined ? Number(data.rating) : 4.4,
-    reviews: data.reviews !== undefined ? Number(data.reviews) : 120,
-    stock: Number(data.stock ?? 0),
+    rating: data.rating !== undefined && Number(data.reviews || 0) > 0 ? Number(data.rating) : 0,
+    reviews: data.reviews !== undefined ? Math.max(0, Number(data.reviews)) : 0,
+    stock: Math.max(0, Math.floor(Number(data.stock ?? 0))),
     image: resolveAssetImage(typeof data.image === 'string' ? data.image : ''),
     created_at: String(data.created_at || data.createdAt || new Date().toISOString()),
     sellerId: typeof data.sellerId === 'string' ? data.sellerId : undefined,
@@ -172,9 +191,13 @@ function mapOrderDoc(id: string, data: Record<string, unknown>): Order {
     address: String(data.address || ''),
     total_amount: totalAmount,
     total: totalAmount,
+    subtotal: data.subtotal !== undefined ? Number(data.subtotal) : undefined,
+    deliveryFee: data.deliveryFee !== undefined ? Number(data.deliveryFee) : undefined,
     platformFee: data.platformFee !== undefined ? Number(data.platformFee) : undefined,
     couponCode: typeof data.couponCode === 'string' ? data.couponCode : undefined,
     couponDiscount: data.couponDiscount !== undefined ? Number(data.couponDiscount) : undefined,
+    stockDeducted: data.stockDeducted === true,
+    stockRestored: data.stockRestored === true,
     paymentMethod: String(data.paymentMethod || 'Cash on Delivery'),
     status: validStatus,
     courierName: typeof data.courierName === 'string' && data.courierName.trim() ? data.courierName.trim() : undefined,
@@ -310,8 +333,8 @@ async function seedDefaultProducts(): Promise<void> {
         description: prod.description,
         price: prod.price,
         mrp: prod.mrp ?? null,
-        rating: prod.rating ?? 4.4,
-        reviews: prod.reviews ?? 120,
+        rating: 0,
+        reviews: 0,
         stock: prod.stock,
         image: prod.image,
         created_at: prod.created_at,
@@ -456,8 +479,8 @@ export async function saveProductFirestore(payload: {
       description: payload.description.trim(),
       price: payload.price,
       mrp: mrpValue,
-      rating: payload.rating || 4.4,
-      reviews: payload.reviews || 120,
+      rating: payload.rating ?? 0,
+      reviews: payload.reviews ?? 0,
       stock: Math.max(0, Math.floor(payload.stock)),
       image: payload.image,
       created_at: payload.created_at || nowIso,
@@ -658,6 +681,102 @@ export async function deleteUserFirestore(user: User): Promise<{ success: boolea
   }
 }
 
+const STOCK_RESTORE_STATUSES: OrderStatus[] = ['Cancelled', 'Return Approved', 'Refunded'];
+
+function shouldRestoreStockOnTransition(prevStatus: OrderStatus, nextStatus: OrderStatus, alreadyRestored?: boolean): boolean {
+  if (alreadyRestored) return false;
+  if (STOCK_RESTORE_STATUSES.includes(prevStatus)) return false;
+  return STOCK_RESTORE_STATUSES.includes(nextStatus);
+}
+
+export async function restoreOrderStockFirestore(
+  order: Order
+): Promise<{ restored: boolean; message?: string }> {
+  if (!order.items || order.items.length === 0) return { restored: false };
+  if (order.stockRestored) return { restored: false };
+
+  const nowIso = new Date().toISOString();
+  const qtyByDocId = new Map<string, { product_id: number; quantity: number }>();
+  order.items.forEach((it) => {
+    const docKey = it.product_doc_id || String(it.product_id);
+    const qty = Math.max(1, Math.floor(Number(it.quantity) || 1));
+    const prev = qtyByDocId.get(docKey);
+    qtyByDocId.set(docKey, {
+      product_id: it.product_id,
+      quantity: (prev?.quantity || 0) + qty,
+    });
+  });
+
+  // Always restore local cache immediately
+  restoreProductStockLocal(
+    Array.from(qtyByDocId.values()).map((v) => ({
+      product_id: v.product_id,
+      quantity: v.quantity,
+    }))
+  );
+
+  if (!order.docId) {
+    return { restored: true };
+  }
+
+  try {
+    const restoredInTx = await runTransaction(db, async (tx) => {
+      const orderRef = doc(db, 'orders', order.docId!);
+      const orderSnap = await tx.get(orderRef);
+      if (orderSnap.exists()) {
+        const orderData = orderSnap.data() as Record<string, unknown>;
+        if (orderData.stockRestored === true) {
+          return false;
+        }
+      }
+
+      const entries = Array.from(qtyByDocId.entries());
+      const prodSnaps = await Promise.all(
+        entries.map(([prodDocId]) => tx.get(doc(db, 'products', prodDocId)))
+      );
+
+      entries.forEach(([prodDocId, info], idx) => {
+        const snap = prodSnaps[idx];
+        const prodRef = doc(db, 'products', prodDocId);
+        if (snap.exists()) {
+          const data = snap.data() as Record<string, unknown>;
+          const currentStock = Math.max(0, Math.floor(Number(data.stock ?? 0)));
+          tx.update(prodRef, {
+            stock: currentStock + info.quantity,
+            updatedAt: nowIso,
+          });
+        }
+      });
+
+      if (orderSnap.exists()) {
+        tx.update(orderRef, {
+          stockRestored: true,
+          stockRestoredAt: nowIso,
+          updatedAt: nowIso,
+        });
+      }
+      return true;
+    });
+    return { restored: restoredInTx };
+  } catch {
+    // Fallback atomic increment if transaction is restricted
+    await Promise.allSettled(
+      Array.from(qtyByDocId.entries()).map(([prodDocId, info]) =>
+        updateDoc(doc(db, 'products', prodDocId), {
+          stock: increment(info.quantity),
+          updatedAt: nowIso,
+        })
+      )
+    );
+    await updateDoc(doc(db, 'orders', order.docId), {
+      stockRestored: true,
+      stockRestoredAt: nowIso,
+      updatedAt: nowIso,
+    }).catch(() => {});
+    return { restored: true };
+  }
+}
+
 export async function placeOrderFirestore(payload: {
   userId: string;
   numericUserId: number;
@@ -666,6 +785,7 @@ export async function placeOrderFirestore(payload: {
   email: string;
   address: string;
   paymentMethod?: string;
+  deliveryFee?: number;
   platformFee?: number;
   couponCode?: string;
   couponDiscount?: number;
@@ -676,8 +796,14 @@ export async function placeOrderFirestore(payload: {
   }
 
   for (const entry of payload.items) {
-    if (entry.product.stock < entry.quantity) {
-      return { success: false, message: `${entry.product.name} has insufficient stock.` };
+    if (entry.product.stock <= 0 || entry.product.stock < entry.quantity) {
+      return {
+        success: false,
+        message:
+          entry.product.stock <= 0
+            ? `${entry.product.name} is Out of Stock.`
+            : `Only ${entry.product.stock} unit(s) left for ${entry.product.name}.`,
+      };
     }
   }
 
@@ -687,7 +813,7 @@ export async function placeOrderFirestore(payload: {
     let subtotal = 0;
 
     const orderItems: OrderItem[] = payload.items.map((entry, idx) => {
-      const qty = Math.max(1, Number(entry.quantity) || 1);
+      const qty = Math.max(1, Math.floor(Number(entry.quantity) || 1));
       const unitPrice = Number(entry.product.price) || 0;
       subtotal += unitPrice * qty;
       const item: OrderItem = {
@@ -706,9 +832,10 @@ export async function placeOrderFirestore(payload: {
       return item;
     });
 
+    const deliveryFee = Math.max(0, Number(payload.deliveryFee ?? 0));
     const platformFee = Math.max(0, Number(payload.platformFee ?? 10));
-    const couponDiscount = Math.max(0, Number(payload.couponDiscount ?? 0));
-    const total = Math.max(0, subtotal - couponDiscount + platformFee);
+    const couponDiscount = Math.max(0, Math.min(subtotal, Number(payload.couponDiscount ?? 0)));
+    const total = Math.max(0, subtotal - couponDiscount + deliveryFee + platformFee);
 
     const sellerIds = Array.from(
       new Set(orderItems.map((it) => it.sellerId).filter((v): v is string => Boolean(v)))
@@ -735,22 +862,101 @@ export async function placeOrderFirestore(payload: {
       items: orderItems,
       sellerIds,
       sellerEmails,
+      subtotal,
+      deliveryFee,
       platformFee,
-      couponCode: payload.couponCode || '',
+      couponCode: (payload.couponCode || '').trim().toUpperCase(),
       couponDiscount,
       total,
       total_amount: total,
       paymentMethod,
       status: 'Confirmed' as const,
+      stockDeducted: true,
+      stockRestored: false,
       deliveryOtp,
       deliveryOtpVerified: false,
       createdAt: nowIso,
       created_at: nowIso,
     };
 
-    await setDoc(orderDocRef, orderPayload);
+    // Aggregate requested quantities per Firestore product document
+    const qtyByDocId = new Map<string, { product: Product; quantity: number }>();
+    payload.items.forEach((entry) => {
+      const docId = entry.product.docId || String(entry.product.id);
+      const qty = Math.max(1, Math.floor(Number(entry.quantity) || 1));
+      const existing = qtyByDocId.get(docId);
+      qtyByDocId.set(docId, {
+        product: entry.product,
+        quantity: (existing?.quantity || 0) + qty,
+      });
+    });
 
-    // Immediately deduct stock locally so UI & offline cache update right away
+    // Atomic Firestore Transaction: verify live inventory, lock & deduct stock, and create order together
+    await runTransaction(db, async (tx) => {
+      const entries = Array.from(qtyByDocId.entries());
+      const snapshots = await Promise.all(
+        entries.map(([prodDocId]) => tx.get(doc(db, 'products', prodDocId)))
+      );
+
+      // Verify exact real-time stock before performing any writes
+      const nextStocks: { ref: ReturnType<typeof doc>; exists: boolean; nextStock: number; product: Product }[] = [];
+      entries.forEach(([prodDocId, info], idx) => {
+        const snap = snapshots[idx];
+        const prodRef = doc(db, 'products', prodDocId);
+        let liveStock = Math.max(0, Math.floor(Number(info.product.stock ?? 0)));
+        if (snap.exists()) {
+          const d = snap.data() as Record<string, unknown>;
+          if (typeof d.stock === 'number' && Number.isFinite(d.stock)) {
+            liveStock = Math.max(0, Math.floor(d.stock));
+          }
+        }
+        if (liveStock <= 0) {
+          throw new Error(`INSUFFICIENT_STOCK:${info.product.name} just went Out of Stock.`);
+        }
+        if (liveStock < info.quantity) {
+          throw new Error(
+            `INSUFFICIENT_STOCK:Only ${liveStock} unit(s) of ${info.product.name} left in stock. Please reduce quantity.`
+          );
+        }
+        nextStocks.push({
+          ref: prodRef,
+          exists: snap.exists(),
+          nextStock: Math.max(0, liveStock - info.quantity),
+          product: info.product,
+        });
+      });
+
+      // Perform atomic stock deductions + order creation inside same transaction
+      nextStocks.forEach(({ ref, exists, nextStock, product }) => {
+        if (exists) {
+          tx.update(ref, {
+            stock: nextStock,
+            updatedAt: nowIso,
+          });
+        } else {
+          tx.set(
+            ref,
+            {
+              id: product.id,
+              cat_id: product.cat_id,
+              name: product.name,
+              description: product.description,
+              price: product.price,
+              mrp: product.mrp ?? null,
+              stock: nextStock,
+              image: product.image,
+              created_at: product.created_at,
+              updatedAt: nowIso,
+            },
+            { merge: true }
+          );
+        }
+      });
+
+      tx.set(orderDocRef, orderPayload);
+    });
+
+    // Sync local cache immediately
     deductProductStockLocal(
       payload.items.map((entry) => ({
         product_id: entry.product.id,
@@ -758,42 +964,13 @@ export async function placeOrderFirestore(payload: {
       }))
     );
 
-    // Deduct stock in Firestore (reads latest stock when available to stay accurate under concurrent orders)
-    await Promise.allSettled(
-      payload.items.map(async (entry) => {
-        const prodDocId = entry.product.docId || String(entry.product.id);
-        const qty = Math.max(1, Math.floor(Number(entry.quantity) || 1));
-        const prodRef = doc(db, 'products', prodDocId);
-        let baseStock = Number(entry.product.stock ?? 0);
-        try {
-          const latestSnap = await getDoc(prodRef);
-          if (latestSnap.exists()) {
-            const latestData = latestSnap.data() as Record<string, unknown>;
-            if (typeof latestData.stock === 'number' && Number.isFinite(latestData.stock)) {
-              baseStock = latestData.stock;
-            }
-          }
-        } catch {
-          // Use known client stock if pre-read fails
-        }
-        const nextStock = Math.max(0, Math.floor(baseStock) - qty);
-        try {
-          await updateDoc(prodRef, {
-            stock: nextStock,
-            updatedAt: nowIso,
-          });
-        } catch {
-          await setDoc(
-            prodRef,
-            {
-              stock: nextStock,
-              updatedAt: nowIso,
-            },
-            { merge: true }
-          );
-        }
-      })
-    );
+    // Track coupon usage count asynchronously
+    if (orderPayload.couponCode && couponDiscount > 0) {
+      updateDoc(doc(db, 'promo_codes', orderPayload.couponCode), {
+        usedCount: increment(1),
+        updatedAt: nowIso,
+      }).catch(() => {});
+    }
 
     if (payload.userId) {
       await setDoc(
@@ -818,6 +995,12 @@ export async function placeOrderFirestore(payload: {
       order: createdOrder,
     };
   } catch (err) {
+    if (err instanceof Error && err.message.startsWith('INSUFFICIENT_STOCK:')) {
+      return {
+        success: false,
+        message: err.message.replace('INSUFFICIENT_STOCK:', '').trim(),
+      };
+    }
     return { success: false, message: getFirestoreErrorMessage(err) };
   }
 }
@@ -865,10 +1048,17 @@ export async function updateOrderStatusFirestore(
   order: Order,
   status: Order['status']
 ): Promise<{ success: boolean; message: string }> {
+  const prevStatus = order.status;
   // Always sync localStore immediately as well
   updateOrderStatusLocal(order.id, status);
+
+  const willRestoreStock = shouldRestoreStockOnTransition(prevStatus, status, order.stockRestored);
+
   const docId = order.docId;
   if (!docId) {
+    if (willRestoreStock) {
+      await restoreOrderStockFirestore(order);
+    }
     return { success: true, message: `Order #${order.id} updated to ${status}.` };
   }
   try {
@@ -876,7 +1066,15 @@ export async function updateOrderStatusFirestore(
       status,
       updatedAt: new Date().toISOString(),
     });
-    return { success: true, message: `Order #${order.id} updated to ${status}.` };
+    if (willRestoreStock) {
+      await restoreOrderStockFirestore(order);
+    }
+    return {
+      success: true,
+      message: willRestoreStock
+        ? `Order #${order.id} updated to ${status} and inventory restored automatically.`
+        : `Order #${order.id} updated to ${status}.`,
+    };
   } catch (err) {
     return { success: false, message: getFirestoreErrorMessage(err) };
   }
@@ -892,10 +1090,12 @@ export async function updateOrderTrackingFirestore(
     trackingNote?: string;
   }
 ): Promise<{ success: boolean; message: string }> {
+  const prevStatus = order.status;
   const cleanCourier = (payload.courierName || '').trim();
   const cleanTrackingId = (payload.trackingId || '').trim();
   const cleanTrackingUrl = (payload.trackingUrl || '').trim();
   const cleanTrackingNote = (payload.trackingNote || '').trim();
+  const willRestoreStock = shouldRestoreStockOnTransition(prevStatus, payload.status, order.stockRestored);
 
   // Always sync localStore immediately
   updateOrderTrackingLocal(order.id, {
@@ -908,6 +1108,9 @@ export async function updateOrderTrackingFirestore(
 
   const docId = order.docId;
   if (!docId) {
+    if (willRestoreStock) {
+      await restoreOrderStockFirestore(order);
+    }
     return { success: true, message: `Live tracking updated for Order #${order.id}.` };
   }
   try {
@@ -919,7 +1122,15 @@ export async function updateOrderTrackingFirestore(
       trackingNote: cleanTrackingNote,
       updatedAt: new Date().toISOString(),
     });
-    return { success: true, message: `Live tracking updated for Order #${order.id}.` };
+    if (willRestoreStock) {
+      await restoreOrderStockFirestore(order);
+    }
+    return {
+      success: true,
+      message: willRestoreStock
+        ? `Order #${order.id} updated to ${payload.status} and inventory restored.`
+        : `Live tracking updated for Order #${order.id}.`,
+    };
   } catch (err) {
     return { success: false, message: getFirestoreErrorMessage(err) };
   }
@@ -978,7 +1189,7 @@ export async function cancelOrderFirestore(order: Order): Promise<{ success: boo
   }
   const res = await updateOrderStatusFirestore(order, 'Cancelled');
   if (!res.success) return res;
-  return { success: true, message: `Order #${order.id} cancelled.` };
+  return { success: true, message: `Order #${order.id} cancelled and item stock restored.` };
 }
 
 export function subscribeAllSellersFirestore(
@@ -1673,9 +1884,7 @@ export async function submitRiderKycApplicationFirestore(payload: {
   selfiePhoto: string;
   loginPin: string;
 }): Promise<{ success: boolean; message: string; rider?: DeliveryBoy }> {
-  const dupCheck = await checkDuplicateMobileFirestore(payload.phone, {
-    excludeRiderEmail: payload.email,
-  });
+  const dupCheck = await checkDuplicateMobileFirestore(payload.phone);
   if (!dupCheck.available) {
     return {
       success: false,
@@ -2127,4 +2336,633 @@ export async function verifyAndDeliverOrderFirestore(
         : `Order #${order.id} verified & marked Delivered!`,
   };
 }
+
+// ==================== DELIVERY SETTINGS (settings/delivery) ====================
+
+function mapDeliverySettingsDoc(data?: Record<string, unknown> | null): DeliverySettings {
+  if (!data) return DEFAULT_DELIVERY_SETTINGS;
+  const freeDeliveryThreshold =
+    typeof data.freeDeliveryThreshold === 'number' && Number.isFinite(data.freeDeliveryThreshold)
+      ? Math.max(0, Math.round(data.freeDeliveryThreshold))
+      : DEFAULT_DELIVERY_SETTINGS.freeDeliveryThreshold;
+  const deliveryCharge =
+    typeof data.deliveryCharge === 'number' && Number.isFinite(data.deliveryCharge)
+      ? Math.max(0, Math.round(data.deliveryCharge))
+      : DEFAULT_DELIVERY_SETTINGS.deliveryCharge;
+  const platformFee =
+    typeof data.platformFee === 'number' && Number.isFinite(data.platformFee)
+      ? Math.max(0, Math.round(data.platformFee))
+      : DEFAULT_DELIVERY_SETTINGS.platformFee;
+  return {
+    freeDeliveryThreshold,
+    deliveryCharge,
+    platformFee,
+    updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : undefined,
+  };
+}
+
+export function subscribeDeliverySettingsFirestore(
+  onData: (settings: DeliverySettings) => void,
+  onError?: (message: string) => void
+): () => void {
+  onData(getDeliverySettingsLocal());
+  const ref = doc(db, 'settings', 'delivery');
+  return onSnapshot(
+    ref,
+    (snap) => {
+      if (snap.exists()) {
+        const mapped = mapDeliverySettingsDoc(snap.data() as Record<string, unknown>);
+        saveDeliverySettingsLocal(mapped);
+        onData(mapped);
+      } else {
+        const fallback = getDeliverySettingsLocal();
+        onData(fallback);
+      }
+    },
+    (err) => {
+      onData(getDeliverySettingsLocal());
+      onError?.(getFirestoreErrorMessage(err));
+    }
+  );
+}
+
+export async function saveDeliverySettingsFirestore(
+  settings: DeliverySettings
+): Promise<{ success: boolean; message: string; settings: DeliverySettings }> {
+  const clean: DeliverySettings = {
+    freeDeliveryThreshold: Math.max(0, Math.round(Number(settings.freeDeliveryThreshold) || 0)),
+    deliveryCharge: Math.max(0, Math.round(Number(settings.deliveryCharge) || 0)),
+    platformFee: Math.max(0, Math.round(Number(settings.platformFee) || 0)),
+    updatedAt: new Date().toISOString(),
+  };
+  saveDeliverySettingsLocal(clean);
+  try {
+    await setDoc(doc(db, 'settings', 'delivery'), clean, { merge: true });
+    return {
+      success: true,
+      settings: clean,
+      message: `Delivery settings saved! Free delivery above ₹${clean.freeDeliveryThreshold.toLocaleString('en-IN')}.`,
+    };
+  } catch (err) {
+    return {
+      success: true,
+      settings: clean,
+      message: `Saved locally (${getFirestoreErrorMessage(err)})`,
+    };
+  }
+}
+
+// ==================== PROMO CODES (promo_codes) ====================
+
+let promoSeedAttempted = false;
+
+function mapPromoCodeDoc(docId: string, data: Record<string, unknown>): PromoCode {
+  const code = String(data.code || docId).trim().toUpperCase();
+  const discountType: 'flat' | 'percent' = data.discountType === 'percent' ? 'percent' : 'flat';
+  return {
+    id: String(data.id || docId),
+    docId,
+    code,
+    discountType,
+    discountValue: Math.max(0, Number(data.discountValue ?? 0)),
+    maxDiscount:
+      data.maxDiscount !== undefined && data.maxDiscount !== null && Number(data.maxDiscount) > 0
+        ? Number(data.maxDiscount)
+        : undefined,
+    minOrderValue: Math.max(0, Number(data.minOrderValue ?? 0)),
+    description: typeof data.description === 'string' ? data.description : undefined,
+    active: data.active !== false,
+    usedCount: Math.max(0, Number(data.usedCount ?? 0)),
+    created_at: typeof data.created_at === 'string' ? data.created_at : new Date().toISOString(),
+  };
+}
+
+export function subscribePromoCodesFirestore(
+  onData: (promos: PromoCode[]) => void,
+  onError?: (message: string) => void
+): () => void {
+  onData(getPromoCodesLocal());
+  return onSnapshot(
+    collection(db, 'promo_codes'),
+    async (snapshot) => {
+      if (snapshot.empty && !promoSeedAttempted) {
+        promoSeedAttempted = true;
+        try {
+          const batch = writeBatch(db);
+          DEFAULT_PROMO_CODES.forEach((p) => {
+            batch.set(doc(db, 'promo_codes', p.code), {
+              id: p.id,
+              code: p.code,
+              discountType: p.discountType,
+              discountValue: p.discountValue,
+              ...(p.maxDiscount ? { maxDiscount: p.maxDiscount } : {}),
+              minOrderValue: p.minOrderValue,
+              description: p.description || '',
+              active: p.active,
+              usedCount: p.usedCount || 0,
+              created_at: p.created_at,
+            });
+          });
+          await batch.commit();
+        } catch {
+          // Use local defaults if seeding is restricted
+        }
+        const localPromos = getPromoCodesLocal();
+        onData(localPromos);
+        return;
+      }
+
+      const list = snapshot.docs
+        .map((d) => mapPromoCodeDoc(d.id, d.data() as Record<string, unknown>))
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      savePromoCodesLocal(list);
+      onData(list);
+    },
+    (err) => {
+      onData(getPromoCodesLocal());
+      onError?.(getFirestoreErrorMessage(err));
+    }
+  );
+}
+
+export async function savePromoCodeFirestore(input: {
+  id?: string;
+  docId?: string;
+  code: string;
+  discountType: 'flat' | 'percent';
+  discountValue: number;
+  maxDiscount?: number;
+  minOrderValue: number;
+  description?: string;
+  active: boolean;
+}): Promise<{ success: boolean; message: string; promo?: PromoCode }> {
+  const cleanCode = input.code.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+  if (cleanCode.length < 3) {
+    return { success: false, message: 'Promo code must be at least 3 alphanumeric characters.' };
+  }
+  const discountVal = Math.round(Number(input.discountValue) || 0);
+  if (discountVal <= 0) {
+    return { success: false, message: 'Discount value must be greater than 0.' };
+  }
+  if (input.discountType === 'percent' && discountVal > 90) {
+    return { success: false, message: 'Percentage discount cannot exceed 90%.' };
+  }
+  const minOrder = Math.max(0, Math.round(Number(input.minOrderValue) || 0));
+  const maxDisc =
+    input.discountType === 'percent' && input.maxDiscount && Number(input.maxDiscount) > 0
+      ? Math.round(Number(input.maxDiscount))
+      : undefined;
+
+  const existingList = getPromoCodesLocal();
+  const existing = existingList.find(
+    (p) => p.code.toUpperCase() === cleanCode || (input.docId && p.docId === input.docId)
+  );
+  const nowIso = new Date().toISOString();
+  const docId = input.docId || cleanCode;
+
+  const promo: PromoCode = {
+    id: existing?.id || docId,
+    docId,
+    code: cleanCode,
+    discountType: input.discountType,
+    discountValue: discountVal,
+    maxDiscount: maxDisc,
+    minOrderValue: minOrder,
+    description:
+      input.description?.trim() ||
+      (input.discountType === 'percent'
+        ? `${discountVal}% OFF${maxDisc ? ` up to ₹${maxDisc}` : ''} on orders above ₹${minOrder}`
+        : `Flat ₹${discountVal} OFF on orders above ₹${minOrder}`),
+    active: input.active,
+    usedCount: existing?.usedCount || 0,
+    created_at: existing?.created_at || nowIso,
+  };
+
+  const nextLocal = [
+    promo,
+    ...existingList.filter((p) => p.docId !== docId && p.code.toUpperCase() !== cleanCode),
+  ];
+  savePromoCodesLocal(nextLocal);
+
+  try {
+    const payload: Record<string, unknown> = {
+      id: promo.id,
+      code: promo.code,
+      discountType: promo.discountType,
+      discountValue: promo.discountValue,
+      minOrderValue: promo.minOrderValue,
+      description: promo.description || '',
+      active: promo.active,
+      usedCount: promo.usedCount || 0,
+      created_at: promo.created_at,
+      updatedAt: nowIso,
+    };
+    if (maxDisc) {
+      payload.maxDiscount = maxDisc;
+    }
+    await setDoc(doc(db, 'promo_codes', docId), payload, { merge: true });
+    return { success: true, promo, message: `Promo code ${cleanCode} saved & synced!` };
+  } catch (err) {
+    return {
+      success: true,
+      promo,
+      message: `Promo code ${cleanCode} saved locally (${getFirestoreErrorMessage(err)})`,
+    };
+  }
+}
+
+export async function togglePromoCodeActiveFirestore(
+  promo: PromoCode
+): Promise<{ success: boolean; message: string }> {
+  const nextActive = !promo.active;
+  const docId = promo.docId || promo.code;
+  const list = getPromoCodesLocal().map((p) =>
+    p.code === promo.code || p.docId === docId ? { ...p, active: nextActive } : p
+  );
+  savePromoCodesLocal(list);
+
+  try {
+    await updateDoc(doc(db, 'promo_codes', docId), {
+      active: nextActive,
+      updatedAt: new Date().toISOString(),
+    });
+    return {
+      success: true,
+      message: `Promo code ${promo.code} ${nextActive ? 'activated' : 'disabled'}.`,
+    };
+  } catch (err) {
+    return {
+      success: true,
+      message: `Updated locally (${getFirestoreErrorMessage(err)})`,
+    };
+  }
+}
+
+export async function deletePromoCodeFirestore(
+  promo: PromoCode
+): Promise<{ success: boolean; message: string }> {
+  const docId = promo.docId || promo.code;
+  const list = getPromoCodesLocal().filter((p) => p.code !== promo.code && p.docId !== docId);
+  savePromoCodesLocal(list);
+  try {
+    await deleteDoc(doc(db, 'promo_codes', docId));
+    return { success: true, message: `Promo code ${promo.code} deleted.` };
+  } catch (err) {
+    return { success: true, message: `Removed locally (${getFirestoreErrorMessage(err)})` };
+  }
+}
+
+export async function incrementPromoCodeUsageFirestore(promoCode?: string): Promise<void> {
+  const cleanCode = (promoCode || '').trim().toUpperCase();
+  if (!cleanCode) return;
+  const list = getPromoCodesLocal().map((p) =>
+    p.code.toUpperCase() === cleanCode ? { ...p, usedCount: (p.usedCount || 0) + 1 } : p
+  );
+  savePromoCodesLocal(list);
+  const matched = list.find((p) => p.code.toUpperCase() === cleanCode);
+  const docId = matched?.docId || cleanCode;
+  try {
+    await updateDoc(doc(db, 'promo_codes', docId), {
+      usedCount: increment(1),
+      updatedAt: new Date().toISOString(),
+    });
+  } catch {
+    // non-fatal
+  }
+}
+
+// ==================== WISHLISTS (wishlists/{uid}) ====================
+
+export function subscribeUserWishlistFirestore(
+  uid: string | undefined,
+  onData: (productIds: number[]) => void
+): () => void {
+  const localIds = getWishlistIdsLocal();
+  onData(localIds);
+  if (!uid) {
+    return () => {};
+  }
+  const ref = doc(db, 'wishlists', uid);
+  return onSnapshot(
+    ref,
+    (snap) => {
+      if (snap.exists()) {
+        const data = snap.data() as Record<string, unknown>;
+        const raw = Array.isArray(data.productIds) ? data.productIds : [];
+        const clean = Array.from(
+          new Set(raw.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))
+        );
+        saveWishlistIdsLocal(clean);
+        onData(clean);
+      }
+    },
+    () => {
+      onData(getWishlistIdsLocal());
+    }
+  );
+}
+
+export async function setUserWishlistFirestore(
+  uid: string | undefined,
+  productIds: number[]
+): Promise<{ success: boolean; ids: number[] }> {
+  const clean = Array.from(
+    new Set(productIds.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0))
+  );
+  saveWishlistIdsLocal(clean);
+  if (!uid) {
+    return { success: true, ids: clean };
+  }
+  try {
+    await setDoc(
+      doc(db, 'wishlists', uid),
+      {
+        userId: uid,
+        productIds: clean,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+    return { success: true, ids: clean };
+  } catch {
+    return { success: true, ids: clean };
+  }
+}
+
+export async function toggleWishlistItemFirestore(
+  uid: string | undefined,
+  currentIds: number[],
+  productId: number
+): Promise<{ added: boolean; ids: number[] }> {
+  const exists = currentIds.includes(productId);
+  const nextIds = exists
+    ? currentIds.filter((id) => id !== productId)
+    : [productId, ...currentIds];
+  await setUserWishlistFirestore(uid, nextIds);
+  return { added: !exists, ids: nextIds };
+}
+
+// ==================== MULTIPLE SAVED ADDRESSES (users/{uid}) ====================
+
+function sanitizeAddressesList(raw: unknown): SavedAddress[] {
+  if (!Array.isArray(raw)) return [];
+  const valid: SavedAddress[] = [];
+  raw.forEach((item, idx) => {
+    if (!item || typeof item !== 'object') return;
+    const obj = item as Record<string, unknown>;
+    const houseStreet = String(obj.houseStreet || '').trim();
+    const pincode = String(obj.pincode || '').replace(/\D/g, '').slice(0, 6);
+    if (!houseStreet && !pincode) return;
+    const labelRaw = String(obj.label || 'Home');
+    const label: 'Home' | 'Work' | 'Other' =
+      labelRaw === 'Work' || labelRaw === 'Other' ? labelRaw : 'Home';
+    valid.push({
+      id: String(obj.id || `addr_${Date.now()}_${idx}`),
+      label,
+      name: String(obj.name || '').trim(),
+      phone: String(obj.phone || '').trim(),
+      houseStreet,
+      area: typeof obj.area === 'string' && obj.area.trim() ? obj.area.trim() : undefined,
+      city: String(obj.city || 'New Delhi').trim(),
+      state: typeof obj.state === 'string' && obj.state.trim() ? obj.state.trim() : undefined,
+      pincode: pincode || '110039',
+      isDefault: Boolean(obj.isDefault),
+      updatedAt: typeof obj.updatedAt === 'string' ? obj.updatedAt : undefined,
+    });
+  });
+  if (valid.length > 0 && !valid.some((a) => a.isDefault)) {
+    valid[0].isDefault = true;
+  }
+  return valid;
+}
+
+export function subscribeUserAddressesFirestore(
+  uid: string | undefined,
+  onData: (addresses: SavedAddress[]) => void
+): () => void {
+  onData(getSavedAddressesLocal());
+  if (!uid) return () => {};
+  return onSnapshot(
+    doc(db, 'users', uid),
+    (snap) => {
+      if (snap.exists()) {
+        const data = snap.data() as Record<string, unknown>;
+        if (Array.isArray(data.savedAddresses)) {
+          const parsed = sanitizeAddressesList(data.savedAddresses);
+          saveAddressesLocal(parsed);
+          onData(parsed);
+        }
+      }
+    },
+    () => {
+      onData(getSavedAddressesLocal());
+    }
+  );
+}
+
+export async function saveUserAddressesFirestore(
+  uid: string | undefined,
+  addresses: SavedAddress[]
+): Promise<{ success: boolean; addresses: SavedAddress[]; message: string }> {
+  const clean = sanitizeAddressesList(addresses);
+  saveAddressesLocal(clean);
+  if (!uid) {
+    return { success: true, addresses: clean, message: 'Address saved on this device.' };
+  }
+  const defaultAddr = clean.find((a) => a.isDefault) || clean[0];
+  try {
+    await setDoc(
+      doc(db, 'users', uid),
+      {
+        savedAddresses: clean.map((a) => ({
+          id: a.id,
+          label: a.label,
+          name: a.name,
+          phone: a.phone,
+          houseStreet: a.houseStreet,
+          area: a.area || '',
+          city: a.city,
+          state: a.state || '',
+          pincode: a.pincode,
+          isDefault: Boolean(a.isDefault),
+          updatedAt: a.updatedAt || new Date().toISOString(),
+        })),
+        ...(defaultAddr
+          ? {
+              address: `${defaultAddr.houseStreet}${defaultAddr.area ? `, ${defaultAddr.area}` : ''}, ${defaultAddr.city}${defaultAddr.state ? `, ${defaultAddr.state}` : ''} - ${defaultAddr.pincode}`,
+            }
+          : {}),
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+    return { success: true, addresses: clean, message: 'Saved addresses synced to your account.' };
+  } catch (err) {
+    return {
+      success: true,
+      addresses: clean,
+      message: `Address saved locally (${getFirestoreErrorMessage(err)})`,
+    };
+  }
+}
+
+// ==================== VERIFIED PURCHASE REVIEWS (reviews) ====================
+
+function mapReviewDoc(docId: string, data: Record<string, unknown>): ProductReview {
+  return {
+    id: String(data.id || docId),
+    docId,
+    productId: Number(data.productId || 0),
+    productDocId: typeof data.productDocId === 'string' ? data.productDocId : undefined,
+    orderId: Number(data.orderId || 0),
+    orderDocId: typeof data.orderDocId === 'string' ? data.orderDocId : undefined,
+    userId: String(data.userId || ''),
+    userName: String(data.userName || 'Verified Buyer'),
+    rating: Math.min(5, Math.max(1, Math.round(Number(data.rating || 5)))),
+    title: String(data.title || '').trim(),
+    comment: String(data.comment || '').trim(),
+    verifiedPurchase: data.verifiedPurchase !== false,
+    created_at: typeof data.created_at === 'string' ? data.created_at : new Date().toISOString(),
+  };
+}
+
+export function subscribeProductReviewsFirestore(
+  onData: (reviews: ProductReview[]) => void
+): () => void {
+  onData(getReviewsLocal());
+  return onSnapshot(
+    collection(db, 'reviews'),
+    (snapshot) => {
+      const list = snapshot.docs
+        .map((d) => mapReviewDoc(d.id, d.data() as Record<string, unknown>))
+        .filter((r) => r.verifiedPurchase && r.productId > 0)
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      saveReviewsLocal(list);
+      onData(list);
+    },
+    () => {
+      onData(getReviewsLocal());
+    }
+  );
+}
+
+export async function submitProductReviewFirestore(input: {
+  product: Product;
+  order: Order;
+  user: User;
+  rating: number;
+  title: string;
+  comment: string;
+  existingReviews: ProductReview[];
+}): Promise<{ success: boolean; message: string; review?: ProductReview }> {
+  if (input.order.status !== 'Delivered') {
+    return {
+      success: false,
+      message: 'Verified purchase reviews can only be submitted after your order is Delivered.',
+    };
+  }
+
+  const containsProduct = (input.order.items || []).some(
+    (it) =>
+      Number(it.product_id) === Number(input.product.id) ||
+      (it.product_doc_id && input.product.docId && it.product_doc_id === input.product.docId)
+  );
+  if (!containsProduct) {
+    return {
+      success: false,
+      message: 'This product was not found in your delivered order.',
+    };
+  }
+
+  const cleanRating = Math.min(5, Math.max(1, Math.round(Number(input.rating) || 0)));
+  if (cleanRating < 1 || cleanRating > 5) {
+    return { success: false, message: 'Please select a star rating between 1 and 5.' };
+  }
+  const cleanComment = input.comment.trim();
+  if (cleanComment.length < 5) {
+    return { success: false, message: 'Please write at least 5 characters in your review.' };
+  }
+
+  const uid = input.user.uid || String(input.user.id);
+  const reviewDocId = `rev_${input.product.id}_${uid}`;
+  const nowIso = new Date().toISOString();
+
+  const review: ProductReview = {
+    id: reviewDocId,
+    docId: reviewDocId,
+    productId: input.product.id,
+    productDocId: input.product.docId || String(input.product.id),
+    orderId: input.order.id,
+    orderDocId: input.order.docId,
+    userId: uid,
+    userName: input.user.name || 'Verified Buyer',
+    rating: cleanRating,
+    title:
+      input.title.trim() ||
+      (cleanRating >= 4 ? 'Great product!' : cleanRating === 3 ? 'Decent quality' : 'Could be better'),
+    comment: cleanComment,
+    verifiedPurchase: true,
+    created_at: nowIso,
+  };
+
+  const mergedReviews = [
+    review,
+    ...input.existingReviews.filter(
+      (r) => !(r.productId === input.product.id && r.userId === uid)
+    ),
+  ];
+  saveReviewsLocal(mergedReviews);
+
+  // Compute exact average rating for this product from verified reviews
+  const productReviews = mergedReviews.filter((r) => r.productId === input.product.id);
+  const avgRating =
+    productReviews.length > 0
+      ? Math.round(
+          (productReviews.reduce((sum, r) => sum + r.rating, 0) / productReviews.length) * 10
+        ) / 10
+      : cleanRating;
+
+  try {
+    await setDoc(
+      doc(db, 'reviews', reviewDocId),
+      {
+        id: review.id,
+        productId: review.productId,
+        productDocId: review.productDocId || '',
+        orderId: review.orderId,
+        orderDocId: review.orderDocId || '',
+        userId: review.userId,
+        userName: review.userName,
+        rating: review.rating,
+        title: review.title,
+        comment: review.comment,
+        verifiedPurchase: true,
+        created_at: review.created_at,
+        updatedAt: nowIso,
+      },
+      { merge: true }
+    );
+
+    if (input.product.docId) {
+      await updateDoc(doc(db, 'products', input.product.docId), {
+        rating: avgRating,
+        reviews: productReviews.length,
+        updatedAt: nowIso,
+      }).catch(() => {});
+    }
+
+    return {
+      success: true,
+      review,
+      message: 'Thank you! Your Verified Purchase review is now live.',
+    };
+  } catch (err) {
+    return {
+      success: true,
+      review,
+      message: `Review saved (${getFirestoreErrorMessage(err)})`,
+    };
+  }
+}
+
 

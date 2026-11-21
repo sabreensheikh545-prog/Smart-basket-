@@ -464,24 +464,41 @@ export const CategoriesView: React.FC<Props> = ({
                     onClick={() => onOpenProduct(prod)}
                     className="group bg-white rounded-xl border border-slate-200/80 overflow-hidden text-left flex flex-col hover:border-[#2874F0]/50 hover:shadow-sm transition"
                   >
-                    <div className="aspect-square bg-slate-50 p-2 overflow-hidden">
+                    <div className="aspect-square bg-slate-50 p-2 overflow-hidden relative">
                       <img
                         src={prod.image}
                         alt={prod.name}
                         referrerPolicy="no-referrer"
-                        className="w-full h-full object-cover rounded-lg group-hover:scale-105 transition duration-200"
+                        className={`w-full h-full object-cover rounded-lg group-hover:scale-105 transition duration-200 ${
+                          prod.stock <= 0 ? 'opacity-50 grayscale' : ''
+                        }`}
                       />
+                      {prod.stock <= 0 && (
+                        <span className="absolute bottom-2 left-2 right-2 text-center py-0.5 rounded bg-slate-900/85 text-white text-[10px] font-bold">
+                          Out of Stock
+                        </span>
+                      )}
                     </div>
                     <div className="p-2.5 flex-1 flex flex-col">
                       <p className="text-xs font-semibold text-slate-900 line-clamp-2 leading-snug group-hover:text-[#2874F0]">
                         {prod.name}
                       </p>
-                      <div className="mt-1 flex items-center gap-1">
-                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-sm bg-[#388E3C] text-white text-[10px] font-bold leading-none tabular-nums">
-                          {(prod.rating || 4.4).toFixed(1)}
-                          <i className="fa-solid fa-star text-[8px]"></i>
-                        </span>
-                      </div>
+                      {Number(prod.reviews || 0) > 0 && Number(prod.rating || 0) > 0 && (
+                        <div className="mt-1 flex items-center gap-1">
+                          <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-sm bg-[#388E3C] text-white text-[10px] font-bold leading-none tabular-nums">
+                            {Number(prod.rating).toFixed(1)}
+                            <i className="fa-solid fa-star text-[8px]"></i>
+                          </span>
+                          <span className="text-[10px] text-slate-400 tabular-nums">
+                            ({Number(prod.reviews).toLocaleString('en-IN')})
+                          </span>
+                        </div>
+                      )}
+                      {prod.stock > 0 && prod.stock <= 5 && (
+                        <p className="mt-1 text-[10px] font-bold text-rose-600">
+                          Only {prod.stock} left in stock!
+                        </p>
+                      )}
                       <div className="mt-auto pt-1.5 flex flex-wrap items-baseline gap-x-1.5">
                         <span className="text-sm font-extrabold text-slate-900 font-mono tabular-nums">
                           {formatINR(prod.price)}
@@ -831,27 +848,41 @@ export const CategoriesView: React.FC<Props> = ({
                           onClick={() => onOpenProduct(prod)}
                           className="group bg-white rounded-xl border border-slate-200/80 overflow-hidden text-left flex flex-col hover:border-[#2874F0]/50 hover:shadow-sm transition"
                         >
-                          <div className="aspect-square bg-slate-50 p-1.5 overflow-hidden">
+                          <div className="aspect-square bg-slate-50 p-1.5 overflow-hidden relative">
                             <img
                               src={prod.image}
                               alt={prod.name}
                               referrerPolicy="no-referrer"
-                              className="w-full h-full object-cover rounded-lg group-hover:scale-105 transition duration-200"
+                              className={`w-full h-full object-cover rounded-lg group-hover:scale-105 transition duration-200 ${
+                                prod.stock <= 0 ? 'opacity-50 grayscale' : ''
+                              }`}
                             />
+                            {prod.stock <= 0 && (
+                              <span className="absolute bottom-1.5 left-1.5 right-1.5 text-center py-0.5 rounded bg-slate-900/85 text-white text-[9px] font-bold">
+                                Out of Stock
+                              </span>
+                            )}
                           </div>
                           <div className="p-2 sm:p-2.5 flex-1 flex flex-col">
                             <p className="text-[11px] sm:text-xs font-semibold text-slate-900 line-clamp-2 leading-snug group-hover:text-[#2874F0]">
                               {prod.name}
                             </p>
-                            <div className="mt-1 flex items-center gap-1">
-                              <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded-sm bg-[#388E3C] text-white text-[9px] font-bold leading-none tabular-nums">
-                                {(prod.rating || 4.4).toFixed(1)}
-                                <i className="fa-solid fa-star text-[7px]"></i>
-                              </span>
-                              <span className="text-[10px] text-slate-400 tabular-nums">
-                                ({(prod.reviews || 120).toLocaleString('en-IN')})
-                              </span>
-                            </div>
+                            {Number(prod.reviews || 0) > 0 && Number(prod.rating || 0) > 0 && (
+                              <div className="mt-1 flex items-center gap-1">
+                                <span className="inline-flex items-center gap-0.5 px-1 py-0.5 rounded-sm bg-[#388E3C] text-white text-[9px] font-bold leading-none tabular-nums">
+                                  {Number(prod.rating).toFixed(1)}
+                                  <i className="fa-solid fa-star text-[7px]"></i>
+                                </span>
+                                <span className="text-[10px] text-slate-400 tabular-nums">
+                                  ({Number(prod.reviews).toLocaleString('en-IN')})
+                                </span>
+                              </div>
+                            )}
+                            {prod.stock > 0 && prod.stock <= 5 && (
+                              <p className="mt-1 text-[10px] font-bold text-rose-600">
+                                Only {prod.stock} left!
+                              </p>
+                            )}
                             <div className="mt-auto pt-1.5 flex flex-wrap items-baseline gap-x-1.5">
                               <span className="text-xs sm:text-sm font-extrabold text-slate-900 font-mono tabular-nums">
                                 {formatINR(prod.price)}

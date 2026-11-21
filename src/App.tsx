@@ -12,34 +12,49 @@ import {
   updatePassword,
   updateProfile,
 } from 'firebase/auth';
+import { AddressBookModal } from './components/AddressBookModal';
 import { AdminView } from './components/AdminView';
 import { CategoriesView } from './components/CategoriesView';
 import { FirstLaunchAuthScreen } from './components/FirstLaunchAuthScreen';
 import { RiderView } from './components/RiderView';
 import { SellerView } from './components/SellerView';
+import { TaxInvoiceModal } from './components/TaxInvoiceModal';
+import { VerifiedReviewModal } from './components/VerifiedReviewModal';
 import { auth, getFirebaseAuthErrorMessage, googleProvider } from './firebase';
 import {
   authenticateDeliveryBoyFirestore,
   cancelOrderFirestore,
+  incrementPromoCodeUsageFirestore,
   placeOrderFirestore,
   requestOrderReturnFirestore,
+  saveUserAddressesFirestore,
+  submitProductReviewFirestore,
   subscribeAllSellersFirestore,
   subscribeCategoriesFirestore,
   subscribeCustomerOrdersFirestore,
+  subscribeDeliverySettingsFirestore,
+  subscribeProductReviewsFirestore,
   subscribeProductsFirestore,
+  subscribePromoCodesFirestore,
+  subscribeUserAddressesFirestore,
+  subscribeUserWishlistFirestore,
   syncUserProfileFirestore,
+  toggleWishlistItemFirestore,
   updateUserProfileFirestore,
 } from './services/firestoreService';
 import {
   ASSETS,
   getBootstrapData,
+  getDeliverySettingsLocal,
+  getPromoCodesLocal,
+  getReviewsLocal,
   getSavedAddressLocal,
+  getSavedAddressesLocal,
   getStoredCurrentRider,
   getStoredSellersLocal,
   getWishlistIdsLocal,
   saveCart,
   saveStructuredAddressLocal,
-  saveWishlistIdsLocal,
   setStoredCurrentRider,
   setStoredCurrentUser,
   syncFirebaseCustomerLocal,
@@ -49,14 +64,20 @@ import {
 import {
   CartEntry,
   Category,
+  DEFAULT_DELIVERY_SETTINGS,
   DeliveryBoy,
+  DeliverySettings,
   Order,
   Product,
+  ProductReview,
+  PromoCode,
   RETURN_REASONS,
   SavedAddress,
   SellerProfile,
   User,
+  calculatePromoDiscount,
   formatINR,
+  formatSavedAddressLine,
   getCourierTrackingUrl,
   getDiscountPercent,
   getEffectiveMrp,
@@ -178,14 +199,27 @@ export default function App() {
   const [pincodeDraft, setPincodeDraft] = useState('');
   const [editingPincode, setEditingPincode] = useState(false);
 
-  // Cart & Structured Delivery Address
+  // Cart, Delivery Rules, Real Promo Codes, Multiple Saved Addresses & Verified Reviews
   const [cart, setCart] = useState<CartEntry[]>([]);
   const [cartTab, setCartTab] = useState<'smart-basket' | 'grocery'>('smart-basket');
   const [discountsExpanded, setDiscountsExpanded] = useState(true);
+  const [deliverySettings, setDeliverySettings] = useState<DeliverySettings>(() =>
+    getDeliverySettingsLocal() || DEFAULT_DELIVERY_SETTINGS
+  );
+  const [promoCodes, setPromoCodes] = useState<PromoCode[]>(() => getPromoCodesLocal());
+  const [allReviews, setAllReviews] = useState<ProductReview[]>(() => getReviewsLocal());
   const [appliedCouponCode, setAppliedCouponCode] = useState('');
   const [couponModalOpen, setCouponModalOpen] = useState(false);
   const [couponDraft, setCouponDraft] = useState('');
   const [couponError, setCouponError] = useState('');
+
+  // Multi-Address Book
+  const [savedAddresses, setSavedAddresses] = useState<SavedAddress[]>(() => getSavedAddressesLocal());
+  const [selectedAddressId, setSelectedAddressId] = useState<string>(
+    () => getSavedAddressLocal()?.id || ''
+  );
+  const [addressBookOpen, setAddressBookOpen] = useState(false);
+  const [addressBookMode, setAddressBookMode] = useState<'manage' | 'select'>('select');
   const [addressModalOpen, setAddressModalOpen] = useState(false);
   const [savedAddress, setSavedAddress] = useState<SavedAddress | null>(() => getSavedAddressLocal());
   const [addrName, setAddrName] = useState('');
@@ -198,6 +232,14 @@ export default function App() {
   const [gpsLoading, setGpsLoading] = useState(false);
   const [gpsError, setGpsError] = useState('');
   const [gpsSuccess, setGpsSuccess] = useState('');
+
+  // Verified Review & Tax Invoice Modals
+  const [reviewModalTarget, setReviewModalTarget] = useState<{
+    product: Product;
+    order: Order;
+    existing?: ProductReview | null;
+  } | null>(null);
+  const [invoiceModalOrder, setInvoiceModalOrder] = useState<Order | null>(null);
 
   // Customer Email/Password & Google Auth
   const [authTab, setAuthTab] = useState<'login' | 'signup'>('login');
@@ -216,8 +258,7 @@ export default function App() {
   const [checkoutAddress, setCheckoutAddress] = useState(() => {
     const saved = getSavedAddressLocal();
     if (!saved) return '';
-    const lineParts = [saved.houseStreet, saved.area, saved.city, saved.state].filter(Boolean);
-    return `${lineParts.join(', ')}${saved.pincode ? ` - ${saved.pincode}` : ''}`;
+    return formatSavedAddressLine(saved);
   });
   const [paymentMethod, setPaymentMethod] = useState<'Online Payment' | 'Cash on Delivery'>('Online Payment');
   
@@ -383,19 +424,52 @@ export default function App() {
     const unsubSellers = subscribeAllSellersFirestore((list) => {
       setSellers(list);
     });
+    const unsubDelivery = subscribeDeliverySettingsFirestore((settings) => {
+      setDeliverySettings(settings);
+    });
+    const unsubPromos = subscribePromoCodesFirestore((promos) => {
+      setPromoCodes(promos);
+    });
+    const unsubReviews = subscribeProductReviewsFirestore((reviews) => {
+      setAllReviews(reviews);
+    });
     return () => {
       unsubCategories();
       unsubProducts();
       unsubSellers();
+      unsubDelivery();
+      unsubPromos();
+      unsubReviews();
     };
   }, [showModal]);
 
-  // Real-time Firestore sync for signed-in customer's orders
+  // Real-time Firestore sync for signed-in customer's orders, wishlist, and saved addresses
   const activeCustomerUid = currentUser?.uid || auth.currentUser?.uid || '';
   useEffect(() => {
+    const unsubWishlist = subscribeUserWishlistFirestore(activeCustomerUid || undefined, (ids) => {
+      setWishlistIds(ids);
+    });
+    const unsubAddresses = subscribeUserAddressesFirestore(activeCustomerUid || undefined, (addrs) => {
+      setSavedAddresses(addrs);
+      if (addrs.length > 0) {
+        const active =
+          addrs.find((a) => a.id === selectedAddressId) ||
+          addrs.find((a) => a.isDefault) ||
+          addrs[0];
+        if (active) {
+          setSelectedAddressId(active.id);
+          setSavedAddress(active);
+          if (active.pincode) setDeliveryPincode(active.pincode);
+        }
+      }
+    });
+
     if (!activeCustomerUid) {
       setOrders([]);
-      return;
+      return () => {
+        unsubWishlist();
+        unsubAddresses();
+      };
     }
     const unsubOrders = subscribeCustomerOrdersFirestore(
       activeCustomerUid,
@@ -408,6 +482,8 @@ export default function App() {
     );
     return () => {
       unsubOrders();
+      unsubWishlist();
+      unsubAddresses();
     };
   }, [activeCustomerUid, showModal]);
 
@@ -585,14 +661,28 @@ export default function App() {
     });
   }, [products, sellers]);
 
-  const PLATFORM_FEE = 10;
-  const AVAILABLE_COUPONS = useMemo(
-    () => [
-      { code: 'SMART100', title: 'Flat ₹100 Off', subtitle: 'Valid on orders of ₹999 & above', minOrder: 999 },
-      { code: 'SAVE10', title: '10% Instant Discount', subtitle: 'Up to ₹500 off on orders above ₹499', minOrder: 499 },
-      { code: 'BASKET50', title: 'Extra ₹50 Off', subtitle: 'Valid on orders of ₹299 & above', minOrder: 299 },
-    ],
-    []
+  // Real verified product rating stats computed strictly from Firestore reviews (zero fake ratings)
+  const productReviewStats = useMemo(() => {
+    const map = new Map<number, { avg: number; count: number; items: ProductReview[] }>();
+    allReviews.forEach((rev) => {
+      const existing = map.get(rev.productId);
+      if (existing) {
+        existing.items.push(rev);
+      } else {
+        map.set(rev.productId, { avg: 0, count: 0, items: [rev] });
+      }
+    });
+    map.forEach((entry) => {
+      entry.count = entry.items.length;
+      const sum = entry.items.reduce((acc, r) => acc + r.rating, 0);
+      entry.avg = entry.count > 0 ? Math.round((sum / entry.count) * 10) / 10 : 0;
+    });
+    return map;
+  }, [allReviews]);
+
+  const activePromoCodes = useMemo(
+    () => promoCodes.filter((p) => p.active),
+    [promoCodes]
   );
 
   // Normalize cart entries against live catalog so price, mrp, and quantity math are always exact
@@ -656,47 +746,68 @@ export default function App() {
     [displayedCartMrpTotal, displayedCartSubtotal]
   );
 
-  const computeCouponDiscount = useCallback((subtotal: number, rawCode: string): number => {
-    if (subtotal <= 0 || !rawCode) return 0;
-    const code = rawCode.trim().toUpperCase();
-    if (code === 'SMART100' && subtotal >= 999) return 100;
-    if (code === 'SAVE10' && subtotal >= 499) {
-      return Math.min(500, Math.round(subtotal * 0.1));
-    }
-    if (code === 'BASKET50' && subtotal >= 299) return 50;
-    return 0;
-  }, []);
+  const appliedPromoObj = useMemo(() => {
+    const clean = appliedCouponCode.trim().toUpperCase();
+    if (!clean) return null;
+    return activePromoCodes.find((p) => p.code.toUpperCase() === clean) || null;
+  }, [appliedCouponCode, activePromoCodes]);
 
   const couponDiscountAmount = useMemo(
-    () => computeCouponDiscount(displayedCartSubtotal, appliedCouponCode),
-    [displayedCartSubtotal, appliedCouponCode, computeCouponDiscount]
+    () => calculatePromoDiscount(displayedCartSubtotal, appliedPromoObj),
+    [displayedCartSubtotal, appliedPromoObj]
   );
 
-  const activePlatformFee = displayedCartEntries.length > 0 ? PLATFORM_FEE : 0;
+  // Free Delivery Nudge & Delivery Charge synced live from Firestore settings/delivery
+  const freeDeliveryThreshold = Math.max(0, Number(deliverySettings.freeDeliveryThreshold ?? 499));
+  const baseDeliveryCharge = Math.max(0, Number(deliverySettings.deliveryCharge ?? 40));
+  const configuredPlatformFee = Math.max(0, Number(deliverySettings.platformFee ?? 10));
+
+  const cartDeliveryFee = useMemo(() => {
+    if (displayedCartEntries.length === 0) return 0;
+    if (freeDeliveryThreshold === 0 || displayedCartSubtotal >= freeDeliveryThreshold) return 0;
+    return baseDeliveryCharge;
+  }, [displayedCartEntries.length, displayedCartSubtotal, freeDeliveryThreshold, baseDeliveryCharge]);
+
+  const amountForFreeDelivery = useMemo(() => {
+    if (freeDeliveryThreshold <= 0) return 0;
+    return Math.max(0, freeDeliveryThreshold - displayedCartSubtotal);
+  }, [freeDeliveryThreshold, displayedCartSubtotal]);
+
+  const freeDeliveryProgressPct = useMemo(() => {
+    if (freeDeliveryThreshold <= 0) return 100;
+    return Math.min(100, Math.round((displayedCartSubtotal / freeDeliveryThreshold) * 100));
+  }, [freeDeliveryThreshold, displayedCartSubtotal]);
+
+  const activePlatformFee = displayedCartEntries.length > 0 ? configuredPlatformFee : 0;
   const finalCartPayable = useMemo(
     () =>
       displayedCartEntries.length > 0
-        ? Math.max(0, displayedCartSubtotal - couponDiscountAmount + activePlatformFee)
+        ? Math.max(0, displayedCartSubtotal - couponDiscountAmount + cartDeliveryFee + activePlatformFee)
         : 0,
-    [displayedCartEntries.length, displayedCartSubtotal, couponDiscountAmount, activePlatformFee]
+    [displayedCartEntries.length, displayedCartSubtotal, couponDiscountAmount, cartDeliveryFee, activePlatformFee]
   );
   const totalCartSavings = useMemo(
-    () => Math.max(0, mrpDiscountAmount + couponDiscountAmount),
-    [mrpDiscountAmount, couponDiscountAmount]
+    () => Math.max(0, mrpDiscountAmount + couponDiscountAmount + (cartDeliveryFee === 0 && displayedCartEntries.length > 0 ? baseDeliveryCharge : 0)),
+    [mrpDiscountAmount, couponDiscountAmount, cartDeliveryFee, displayedCartEntries.length, baseDeliveryCharge]
   );
 
-  // Full cart checkout totals (always accurately multiplying price * qty + ₹10 platform fee - coupon)
+  // Full cart checkout totals (exact sync across Razorpay, COD, Firestore Order, and Tax Invoice)
   const checkoutCouponDiscount = useMemo(
-    () => computeCouponDiscount(cartTotal, appliedCouponCode),
-    [cartTotal, appliedCouponCode, computeCouponDiscount]
+    () => calculatePromoDiscount(cartTotal, appliedPromoObj),
+    [cartTotal, appliedPromoObj]
   );
-  const checkoutPlatformFee = normalizedCart.length > 0 ? PLATFORM_FEE : 0;
+  const checkoutDeliveryFee = useMemo(() => {
+    if (normalizedCart.length === 0) return 0;
+    if (freeDeliveryThreshold === 0 || cartTotal >= freeDeliveryThreshold) return 0;
+    return baseDeliveryCharge;
+  }, [normalizedCart.length, cartTotal, freeDeliveryThreshold, baseDeliveryCharge]);
+  const checkoutPlatformFee = normalizedCart.length > 0 ? configuredPlatformFee : 0;
   const checkoutPayableTotal = useMemo(
     () =>
       normalizedCart.length > 0
-        ? Math.max(0, cartTotal - checkoutCouponDiscount + checkoutPlatformFee)
+        ? Math.max(0, cartTotal - checkoutCouponDiscount + checkoutDeliveryFee + checkoutPlatformFee)
         : 0,
-    [normalizedCart.length, cartTotal, checkoutCouponDiscount, checkoutPlatformFee]
+    [normalizedCart.length, cartTotal, checkoutCouponDiscount, checkoutDeliveryFee, checkoutPlatformFee]
   );
 
   const estimatedDeliveryDate = useMemo(() => {
@@ -853,28 +964,64 @@ export default function App() {
     );
   }, []);
 
-  const handleApplyCouponCode = (rawCode: string) => {
+  const openAddressBook = useCallback((modeType: 'manage' | 'select' = 'select') => {
+    setAddressBookMode(modeType);
+    setAddressBookOpen(true);
+  }, []);
+
+  const applySelectedSavedAddress = useCallback((addr: SavedAddress) => {
+    setSelectedAddressId(addr.id);
+    setSavedAddress(addr);
+    saveStructuredAddressLocal(addr);
+    if (addr.pincode) setDeliveryPincode(addr.pincode);
+    setCheckoutName(addr.name);
+    setCheckoutPhone(addr.phone);
+    setCheckoutAddress(formatSavedAddressLine(addr));
+  }, []);
+
+  const handleSaveAddressBook = useCallback(
+    async (next: SavedAddress[], nextSelectedId?: string) => {
+      const res = await saveUserAddressesFirestore(activeCustomerUid || undefined, next);
+      setSavedAddresses(res.addresses);
+      const chosen =
+        res.addresses.find((a) => a.id === nextSelectedId) ||
+        res.addresses.find((a) => a.isDefault) ||
+        res.addresses[0] ||
+        null;
+      if (chosen) {
+        applySelectedSavedAddress(chosen);
+      } else {
+        setSelectedAddressId('');
+        setSavedAddress(null);
+      }
+    },
+    [activeCustomerUid, applySelectedSavedAddress]
+  );
+
+  const handleApplyCouponCode = (rawCode: string, targetSubtotal?: number) => {
     const code = rawCode.trim().toUpperCase();
+    const checkSubtotal = targetSubtotal !== undefined ? targetSubtotal : Math.max(displayedCartSubtotal, cartTotal);
     setCouponError('');
     if (!code) {
-      setCouponError('Please enter a coupon code.');
+      setCouponError('Please enter a promo code.');
       return;
     }
-    const found = AVAILABLE_COUPONS.find((c) => c.code === code);
+    const found = activePromoCodes.find((c) => c.code.toUpperCase() === code);
     if (!found) {
-      setCouponError('Invalid coupon code. Try SMART100, SAVE10, or BASKET50.');
+      setCouponError('Invalid or inactive promo code.');
       return;
     }
-    if (displayedCartSubtotal < found.minOrder) {
-      setCouponError(`Minimum cart value of ${formatINR(found.minOrder)} required for ${found.code}.`);
+    if (checkSubtotal < found.minOrderValue) {
+      setCouponError(`Minimum order value of ${formatINR(found.minOrderValue)} required for ${found.code}.`);
       return;
     }
+    const disc = calculatePromoDiscount(checkSubtotal, found);
     setAppliedCouponCode(found.code);
     setCouponDraft('');
     setCouponModalOpen(false);
     showModal({
-      title: 'Coupon Applied',
-      message: `${found.code} (${found.title}) has been applied to your cart.`,
+      title: 'Promo Code Applied',
+      message: `${found.code} applied! You save ${formatINR(disc)} on this order.`,
       type: 'success',
     });
   };
@@ -907,6 +1054,8 @@ export default function App() {
     }
 
     const structured: SavedAddress = {
+      id: savedAddress?.id || `addr_${Date.now()}`,
+      label: savedAddress?.label || 'Home',
       name: cleanName,
       phone: cleanPhone,
       houseStreet: cleanHouse || cleanArea,
@@ -914,16 +1063,16 @@ export default function App() {
       city: cleanCity,
       state: cleanState,
       pincode: cleanPin,
+      isDefault: true,
+      updatedAt: new Date().toISOString(),
     };
-    const formattedParts = [cleanHouse, cleanArea, cleanCity, cleanState].filter(Boolean);
-    const formattedAddress = `${formattedParts.join(', ')} - ${cleanPin}`;
+    const formattedAddress = formatSavedAddressLine(structured);
 
-    saveStructuredAddressLocal(structured);
-    setSavedAddress(structured);
-    setDeliveryPincode(cleanPin);
-    setCheckoutName(cleanName);
-    setCheckoutPhone(cleanPhone);
-    setCheckoutAddress(formattedAddress);
+    const merged = [
+      structured,
+      ...savedAddresses.filter((a) => a.id !== structured.id).map((a) => ({ ...a, isDefault: false })),
+    ];
+    await handleSaveAddressBook(merged, structured.id);
     setProfAddress(formattedAddress);
 
     if (currentUser) {
@@ -952,12 +1101,63 @@ export default function App() {
     setAddressModalOpen(false);
   };
 
-  const toggleWishlist = (productId: number) => {
-    setWishlistIds((prev) => {
-      const next = prev.includes(productId) ? prev.filter((id) => id !== productId) : [...prev, productId];
-      saveWishlistIdsLocal(next);
-      return next;
+  const toggleWishlist = async (productId: number) => {
+    const res = await toggleWishlistItemFirestore(activeCustomerUid || undefined, wishlistIds, productId);
+    setWishlistIds(res.ids);
+  };
+
+  const handleSaveForLater = async (prod: Product) => {
+    if (!wishlistIds.includes(prod.id)) {
+      const res = await toggleWishlistItemFirestore(activeCustomerUid || undefined, wishlistIds, prod.id);
+      setWishlistIds(res.ids);
+    }
+    updateCartQty(prod.id, 0);
+    showRiderToast(`${prod.name} saved to Wishlist for later.`, 'info');
+  };
+
+  const handleMoveWishlistToCart = async (prod: Product) => {
+    if (prod.stock <= 0) {
+      showModal({ title: 'Out of Stock', message: `${prod.name} is currently Out of Stock.`, type: 'error' });
+      return;
+    }
+    addToCart(prod, 1, false);
+    if (wishlistIds.includes(prod.id)) {
+      const res = await toggleWishlistItemFirestore(activeCustomerUid || undefined, wishlistIds, prod.id);
+      setWishlistIds(res.ids);
+    }
+  };
+
+  const wishlistProducts = useMemo(
+    () =>
+      wishlistIds
+        .map((id) => publicProducts.find((p) => p.id === id) || products.find((p) => p.id === id))
+        .filter((p): p is Product => Boolean(p)),
+    [wishlistIds, publicProducts, products]
+  );
+
+  const handleSubmitVerifiedReview = async (payload: { rating: number; title: string; comment: string }) => {
+    if (!reviewModalTarget || !currentUser) return;
+    showLoader('Publishing verified review...');
+    const res = await submitProductReviewFirestore({
+      product: reviewModalTarget.product,
+      order: reviewModalTarget.order,
+      user: currentUser,
+      rating: payload.rating,
+      title: payload.title,
+      comment: payload.comment,
+      existingReviews: allReviews,
     });
+    hideLoader();
+    if (res.success && res.review) {
+      setAllReviews((prev) => [
+        res.review!,
+        ...prev.filter((r) => !(r.productId === res.review!.productId && r.userId === res.review!.userId)),
+      ]);
+      setReviewModalTarget(null);
+      showModal({ title: 'Verified Review Published', message: res.message, type: 'success' });
+    } else {
+      showModal({ title: 'Review Not Allowed', message: res.message, type: 'error' });
+    }
   };
 
   const handleShareProduct = async (prod: Product) => {
@@ -1003,9 +1203,11 @@ export default function App() {
     if (sortBy === 'price_desc') return [...list].sort((a, b) => b.price - a.price);
     if (sortBy === 'top_rated') {
       return [...list].sort((a, b) => {
-        const ratingDiff = (b.rating || 4.4) - (a.rating || 4.4);
+        const statsA = productReviewStats.get(a.id);
+        const statsB = productReviewStats.get(b.id);
+        const ratingDiff = (statsB?.avg || 0) - (statsA?.avg || 0);
         if (ratingDiff !== 0) return ratingDiff;
-        return (b.reviews || 0) - (a.reviews || 0);
+        return (statsB?.count || 0) - (statsA?.count || 0);
       });
     }
     // Relevance: prioritize exact/prefix name matches when searching
@@ -1037,6 +1239,19 @@ export default function App() {
         o.user_id === currentUser.id
     );
   }, [orders, currentUser]);
+
+  const findDeliveredOrderForProduct = useCallback(
+    (productId: number): Order | null => {
+      return (
+        userOrders.find(
+          (ord) =>
+            ord.status === 'Delivered' &&
+            (ord.items || []).some((it) => Number(it.product_id) === Number(productId))
+        ) || null
+      );
+    },
+    [userOrders]
+  );
 
   const activeOrders = useMemo(
     () =>
@@ -1370,8 +1585,8 @@ export default function App() {
       quantity: Math.max(1, Math.floor(Number(c.quantity) || 1)),
     }));
 
-        const finalizeOrder = async (methodLabel: string) => {
-      showLoader('Placing order...');
+    const finalizeOrder = async (methodLabel: string) => {
+      showLoader('Locking inventory & placing order...');
       const res = await placeOrderFirestore({
         userId: currentUser.uid || auth.currentUser?.uid || String(currentUser.id),
         numericUserId: currentUser.id,
@@ -1380,13 +1595,17 @@ export default function App() {
         email: currentUser.email || auth.currentUser?.email || '',
         address: checkoutAddress,
         paymentMethod: methodLabel,
+        deliveryFee: checkoutDeliveryFee,
         platformFee: checkoutPlatformFee,
-        couponCode: appliedCouponCode || '',
+        couponCode: checkoutCouponDiscount > 0 ? appliedCouponCode : '',
         couponDiscount: checkoutCouponDiscount,
         items: normalizedCart.map((c) => ({ product: c.product, quantity: c.quantity })),
       });
       hideLoader();
       if (res.success) {
+        if (checkoutCouponDiscount > 0 && appliedCouponCode) {
+          incrementPromoCodeUsageFirestore(appliedCouponCode).catch(() => {});
+        }
         const qtyByProductId = new Map<number, number>();
         orderedQuantities.forEach((item) => {
           qtyByProductId.set(item.productId, (qtyByProductId.get(item.productId) || 0) + item.quantity);
@@ -1547,34 +1766,52 @@ export default function App() {
   const renderFlipkartProductCard = (prod: Product) => {
     const mrp = getEffectiveMrp(prod.price, prod.mrp);
     const discount = getDiscountPercent(prod.price, mrp);
-    const rating = (prod.rating || 4.4).toFixed(1);
-    const reviews = (prod.reviews || 1240).toLocaleString('en-IN');
+    const stats = productReviewStats.get(prod.id);
+    const realRatingCount = stats?.count || 0;
+    const realRatingAvg = stats?.avg || 0;
     const isOutOfStock = prod.stock <= 0;
+    const isLowStock = prod.stock > 0 && prod.stock <= 5;
+    const isWishlisted = wishlistIds.includes(prod.id);
 
     return (
       <div
         key={prod.id}
         className="bg-white rounded-lg border border-slate-200/80 overflow-hidden flex flex-col hover:shadow-md transition"
       >
-        <button
-          type="button"
-          onClick={() => openProductDetail(prod)}
-          className="relative block aspect-square bg-slate-50 overflow-hidden p-2"
-        >
-          <img
-            src={prod.image}
-            alt={prod.name}
-            referrerPolicy="no-referrer"
-            className={`w-full h-full object-cover rounded-md hover:scale-105 transition duration-300 ${
-              isOutOfStock ? 'opacity-55 grayscale-[30%]' : ''
-            }`}
-          />
+        <div className="relative aspect-square bg-slate-50 overflow-hidden p-2">
+          <button
+            type="button"
+            onClick={() => openProductDetail(prod)}
+            className="block w-full h-full overflow-hidden rounded-md"
+          >
+            <img
+              src={prod.image}
+              alt={prod.name}
+              referrerPolicy="no-referrer"
+              className={`w-full h-full object-cover rounded-md hover:scale-105 transition duration-300 ${
+                isOutOfStock ? 'opacity-55 grayscale-[30%]' : ''
+              }`}
+            />
+          </button>
           {isOutOfStock && (
             <span className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded bg-rose-600 text-white text-[10px] font-extrabold uppercase tracking-wide shadow-xs">
               Out of Stock
             </span>
           )}
-        </button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleWishlist(prod.id);
+            }}
+            aria-label={isWishlisted ? 'Remove from Wishlist' : 'Save to Wishlist'}
+            className={`absolute top-2.5 right-2.5 w-8 h-8 rounded-full bg-white/95 border border-slate-200/80 shadow-xs flex items-center justify-center transition active:scale-90 ${
+              isWishlisted ? 'text-[#E53935]' : 'text-slate-400 hover:text-[#E53935]'
+            }`}
+          >
+            <i className={`${isWishlisted ? 'fa-solid' : 'fa-regular'} fa-heart text-xs`}></i>
+          </button>
+        </div>
 
         <div className="p-2.5 sm:p-3.5 flex-1 flex flex-col">
           <button
@@ -1585,12 +1822,20 @@ export default function App() {
             {prod.name}
           </button>
 
-          <div className="mt-1.5 flex items-center gap-1.5">
-            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-sm bg-[#388E3C] text-white text-[11px] font-bold leading-none tabular-nums">
-              <span>{rating}</span>
-              <i className="fa-solid fa-star text-[9px]"></i>
-            </span>
-            <span className="text-[11px] text-slate-500 font-medium tabular-nums">({reviews})</span>
+          <div className="mt-1.5 flex items-center gap-1.5 min-h-[18px]">
+            {realRatingCount > 0 ? (
+              <>
+                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-sm bg-[#388E3C] text-white text-[11px] font-bold leading-none tabular-nums">
+                  <span>{realRatingAvg.toFixed(1)}</span>
+                  <i className="fa-solid fa-star text-[9px]"></i>
+                </span>
+                <span className="text-[11px] text-slate-500 font-medium tabular-nums">
+                  ({realRatingCount.toLocaleString('en-IN')})
+                </span>
+              </>
+            ) : (
+              <span className="text-[11px] text-slate-400 font-medium">No verified reviews yet</span>
+            )}
           </div>
 
           <div className="mt-2 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
@@ -1615,10 +1860,16 @@ export default function App() {
                 <i className="fa-solid fa-circle-xmark text-[10px]"></i>
                 <span>Out of Stock</span>
               </span>
-            ) : prod.stock <= 5 ? (
-              <span className="text-[11px] font-bold text-amber-700">Only {prod.stock} left · Free Delivery</span>
+            ) : isLowStock ? (
+              <span className="text-[11px] font-extrabold text-rose-600">
+                Only {prod.stock} left in stock!
+              </span>
             ) : (
-              <p className="text-[11px] font-medium text-slate-600">Free Delivery</p>
+              <p className="text-[11px] font-medium text-slate-600">
+                {freeDeliveryThreshold === 0 || prod.price >= freeDeliveryThreshold
+                  ? 'Free Delivery'
+                  : `Free delivery above ${formatINR(freeDeliveryThreshold)}`}
+              </p>
             )}
           </div>
 
@@ -1629,7 +1880,7 @@ export default function App() {
               onClick={() => addToCart(prod, 1, false)}
               className="min-h-[38px] px-1.5 rounded-md bg-[#FF9F00] text-white text-[11px] sm:text-xs font-bold hover:bg-[#e89100] active:scale-95 disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed disabled:active:scale-100 transition whitespace-nowrap"
             >
-              Add to Cart
+              {isOutOfStock ? 'Out of Stock' : 'Add to Cart'}
             </button>
             <button
               type="button"
@@ -2063,18 +2314,30 @@ export default function App() {
         )}
 
         <div className="px-4 py-2.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 bg-white">
-          <button
-            type="button"
-            onClick={() =>
-              setExpandedOrderIds((prev) =>
-                prev.includes(ord.id) ? prev.filter((x) => x !== ord.id) : [...prev, ord.id]
-              )
-            }
-            className="text-xs font-bold text-[#2874F0] hover:underline flex items-center gap-1.5"
-          >
-            <span>View Details</span>
-            <i className={`fa-solid fa-chevron-down text-[10px] transition-transform ${isExpanded ? 'rotate-180' : ''}`}></i>
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() =>
+                setExpandedOrderIds((prev) =>
+                  prev.includes(ord.id) ? prev.filter((x) => x !== ord.id) : [...prev, ord.id]
+                )
+              }
+              className="text-xs font-bold text-[#2874F0] hover:underline flex items-center gap-1.5"
+            >
+              <span>View Details</span>
+              <i className={`fa-solid fa-chevron-down text-[10px] transition-transform ${isExpanded ? 'rotate-180' : ''}`}></i>
+            </button>
+            {!isCancelled && (
+              <button
+                type="button"
+                onClick={() => setInvoiceModalOrder(ord)}
+                className="text-xs font-bold text-slate-600 hover:text-[#2874F0] inline-flex items-center gap-1"
+              >
+                <i className="fa-solid fa-file-invoice text-[11px]"></i>
+                <span>Tax Invoice</span>
+              </button>
+            )}
+          </div>
           <div className="flex items-center gap-2.5">
             {canRequestReturn && (
               <button
@@ -2098,6 +2361,60 @@ export default function App() {
           </div>
         </div>
 
+        {/* Verified Purchase Review Strip (only unlocked when Order Status === Delivered) */}
+        {ord.status === 'Delivered' && currentUser && (
+          <div className="px-4 py-2.5 border-t border-emerald-100 bg-emerald-50/40 space-y-2">
+            <p className="text-[11px] font-extrabold text-emerald-900 flex items-center gap-1.5">
+              <i className="fa-solid fa-star text-amber-500"></i>
+              <span>Verified Purchase · Rate &amp; Review Delivered Items</span>
+            </p>
+            <div className="space-y-1.5">
+              {ord.items.map((it) => {
+                const matchedProduct =
+                  products.find((p) => p.id === it.product_id) || {
+                    id: it.product_id,
+                    docId: it.product_doc_id,
+                    cat_id: 1,
+                    name: it.product_name,
+                    description: '',
+                    price: it.price,
+                    stock: 0,
+                    image: it.product_image,
+                    created_at: ord.created_at,
+                  };
+                const uid = currentUser.uid || String(currentUser.id);
+                const myExisting = allReviews.find(
+                  (r) => r.productId === it.product_id && r.userId === uid
+                );
+                return (
+                  <div
+                    key={it.id}
+                    className="flex items-center justify-between gap-2 bg-white px-3 py-2 rounded-lg border border-emerald-200/80"
+                  >
+                    <span className="text-xs font-semibold text-slate-800 truncate">
+                      {it.product_name}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setReviewModalTarget({
+                          product: matchedProduct,
+                          order: ord,
+                          existing: myExisting || null,
+                        })
+                      }
+                      className="px-2.5 py-1 rounded-md bg-[#2874F0] hover:bg-[#1e60d5] text-white text-[11px] font-bold shrink-0 inline-flex items-center gap-1"
+                    >
+                      <i className="fa-solid fa-star text-[9px] text-[#FFE500]"></i>
+                      <span>{myExisting ? `Rated ${myExisting.rating}★ (Edit)` : 'Write Review'}</span>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {isExpanded && (
           <div className="px-4 pb-4 pt-2 border-t border-slate-100 bg-slate-50 space-y-3">
             <div className="space-y-2">
@@ -2114,6 +2431,15 @@ export default function App() {
               ))}
             </div>
             <div className="pt-2 border-t border-slate-200/70 text-xs text-slate-600 space-y-1">
+              {Number(ord.couponDiscount || 0) > 0 && (
+                <p className="text-emerald-700 font-semibold">
+                  <strong>Promo ({ord.couponCode}):</strong> -{formatINR(Number(ord.couponDiscount || 0))}
+                </p>
+              )}
+              <p>
+                <strong className="text-slate-800">Delivery Charge:</strong>{' '}
+                {Number(ord.deliveryFee || 0) > 0 ? formatINR(Number(ord.deliveryFee || 0)) : 'FREE'}
+              </p>
               <p><strong className="text-slate-800">Recipient:</strong> {ord.name} · {ord.phone}</p>
               <p><strong className="text-slate-800">Delivery Address:</strong> {ord.address}</p>
               <p><strong className="text-slate-800">Payment:</strong> {ord.paymentMethod || 'Cash on Delivery'}</p>
@@ -2891,26 +3217,17 @@ export default function App() {
               .split(/[.,]/)
               .map((s) => s.trim())
               .filter((s) => s.length > 6);
-            const customerReviews = [
-              {
-                id: 'rev-1',
-                rating: 5,
-                title: 'Genuine product & super fast delivery',
-                body: `Loved the build quality of ${selectedProduct.name.split('(')[0].trim()}. Packaging was secure and delivery arrived ahead of schedule.`,
-                author: 'Aarav Sharma',
-                city: 'Bengaluru',
-                daysAgo: '2 days ago',
-              },
-              {
-                id: 'rev-2',
-                rating: 4,
-                title: 'Great value for the price',
-                body: 'Works exactly as described with all included accessories. Definitely worth buying during the deal.',
-                author: 'Priya Nair',
-                city: 'Mumbai',
-                daysAgo: '6 days ago',
-              },
-            ];
+            const detailReviewStats = productReviewStats.get(selectedProduct.id);
+            const verifiedReviews = detailReviewStats?.items || [];
+            const detailRealAvg = detailReviewStats?.avg || 0;
+            const detailRealCount = detailReviewStats?.count || 0;
+            const deliveredOrderForReview = currentUser
+              ? findDeliveredOrderForProduct(selectedProduct.id)
+              : null;
+            const currentUid = currentUser ? currentUser.uid || String(currentUser.id) : '';
+            const myExistingReview = currentUid
+              ? verifiedReviews.find((r) => r.userId === currentUid) || null
+              : null;
 
             return (
               <div className="bg-[#F1F3F6] min-h-screen">
@@ -3038,12 +3355,16 @@ export default function App() {
                           <span aria-hidden="true">·</span>
                           <span className="font-semibold text-slate-700">{detailBrand}</span>
                           <span aria-hidden="true">·</span>
-                          {selectedProduct.stock > 0 ? (
-                            <span className="text-[#2E7D32] font-bold">In Stock ({selectedProduct.stock})</span>
-                          ) : (
+                          {selectedProduct.stock <= 0 ? (
                             <span className="px-2 py-0.5 rounded bg-rose-100 text-rose-700 font-extrabold uppercase text-[11px]">
                               Out of Stock
                             </span>
+                          ) : selectedProduct.stock <= 5 ? (
+                            <span className="px-2 py-0.5 rounded bg-rose-50 border border-rose-200 text-rose-700 font-extrabold text-[11px]">
+                              Only {selectedProduct.stock} left in stock!
+                            </span>
+                          ) : (
+                            <span className="text-[#2E7D32] font-bold">In Stock ({selectedProduct.stock})</span>
                           )}
                         </div>
 
@@ -3052,13 +3373,22 @@ export default function App() {
                         </h1>
 
                         <div className="flex items-center gap-2.5">
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-sm bg-[#388E3C] text-white text-xs font-extrabold tabular-nums">
-                            <span>{(selectedProduct.rating || 4.4).toFixed(1)}</span>
-                            <i className="fa-solid fa-star text-[10px]"></i>
-                          </span>
-                          <span className="text-xs font-semibold text-slate-500 tabular-nums">
-                            {(selectedProduct.reviews || 1240).toLocaleString('en-IN')} Ratings &amp; Reviews
-                          </span>
+                          {detailRealCount > 0 ? (
+                            <>
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-sm bg-[#388E3C] text-white text-xs font-extrabold tabular-nums">
+                                <span>{detailRealAvg.toFixed(1)}</span>
+                                <i className="fa-solid fa-star text-[10px]"></i>
+                              </span>
+                              <span className="text-xs font-semibold text-slate-500 tabular-nums">
+                                {detailRealCount.toLocaleString('en-IN')} Verified{' '}
+                                {detailRealCount === 1 ? 'Review' : 'Reviews'}
+                              </span>
+                            </>
+                          ) : (
+                            <span className="text-xs font-semibold text-slate-400">
+                              No verified buyer ratings yet
+                            </span>
+                          )}
                         </div>
 
                         <div className="pt-1 flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
@@ -3234,31 +3564,87 @@ export default function App() {
                         )}
                       </section>
 
-                      {/* Customer Reviews Preview */}
+                      {/* Verified Purchase Customer Reviews Only (Zero Fake Ratings) */}
                       <section className="bg-white sm:rounded-xl border-y sm:border border-slate-200/80 p-4 sm:p-5 space-y-3.5">
-                        <div className="flex items-center justify-between">
-                          <h2 className="text-sm sm:text-base font-extrabold text-slate-900">Ratings &amp; Reviews</h2>
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-sm bg-[#388E3C] text-white text-xs font-bold tabular-nums">
-                            {(selectedProduct.rating || 4.4).toFixed(1)}
-                            <i className="fa-solid fa-star text-[9px]"></i>
-                          </span>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <h2 className="text-sm sm:text-base font-extrabold text-slate-900">
+                              Verified Buyer Ratings &amp; Reviews
+                            </h2>
+                            {detailRealCount > 0 && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-sm bg-[#388E3C] text-white text-xs font-bold tabular-nums">
+                                {detailRealAvg.toFixed(1)}
+                                <i className="fa-solid fa-star text-[9px]"></i>
+                              </span>
+                            )}
+                          </div>
+                          {deliveredOrderForReview ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setReviewModalTarget({
+                                  product: selectedProduct,
+                                  order: deliveredOrderForReview,
+                                  existing: myExistingReview,
+                                })
+                              }
+                              className="px-3 py-1.5 rounded-lg bg-[#2874F0] hover:bg-[#1e60d5] text-white text-xs font-bold inline-flex items-center gap-1.5 transition"
+                            >
+                              <i className="fa-solid fa-star text-[10px] text-[#FFE500]"></i>
+                              <span>{myExistingReview ? 'Edit Your Review' : 'Write Verified Review'}</span>
+                            </button>
+                          ) : (
+                            <span className="text-[11px] font-semibold text-slate-400">
+                              Verified buyers only (after delivery)
+                            </span>
+                          )}
                         </div>
-                        <div className="divide-y divide-slate-100">
-                          {customerReviews.map((rev) => (
-                            <div key={rev.id} className="py-3 first:pt-0 last:pb-0 space-y-1.5">
-                              <div className="flex items-center gap-2">
-                                <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-sm bg-[#388E3C] text-white text-[10px] font-bold tabular-nums">
-                                  {rev.rating} <i className="fa-solid fa-star text-[8px]"></i>
-                                </span>
-                                <span className="text-xs font-bold text-slate-900">{rev.title}</span>
+
+                        {verifiedReviews.length === 0 ? (
+                          <div className="py-5 px-3 rounded-lg bg-slate-50 border border-slate-100 text-center space-y-1">
+                            <p className="text-xs font-bold text-slate-700">No verified reviews yet</p>
+                            <p className="text-[11px] text-slate-500">
+                              Smart Basket only publishes ratings from customers whose order status is Delivered.
+                            </p>
+                          </div>
+                        ) : (
+                          <div className="divide-y divide-slate-100">
+                            {verifiedReviews.map((rev) => (
+                              <div key={rev.id} className="py-3 first:pt-0 last:pb-0 space-y-1.5">
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-sm text-white text-[10px] font-bold tabular-nums ${
+                                      rev.rating >= 4
+                                        ? 'bg-[#388E3C]'
+                                        : rev.rating === 3
+                                        ? 'bg-amber-500'
+                                        : 'bg-rose-600'
+                                    }`}
+                                  >
+                                    {rev.rating} <i className="fa-solid fa-star text-[8px]"></i>
+                                  </span>
+                                  <span className="text-xs font-bold text-slate-900">{rev.title}</span>
+                                </div>
+                                <p className="text-xs text-slate-600 leading-relaxed">{rev.comment}</p>
+                                <p className="text-[11px] text-slate-400 flex items-center gap-1.5 flex-wrap">
+                                  <span className="font-semibold text-slate-600">{rev.userName}</span>
+                                  <span className="inline-flex items-center gap-1 text-emerald-700 font-semibold">
+                                    <i className="fa-solid fa-circle-check text-[10px]"></i>
+                                    <span>Verified Purchase</span>
+                                  </span>
+                                  <span>·</span>
+                                  <span>
+                                    {new Date(rev.created_at).toLocaleDateString('en-IN', {
+                                      day: '2-digit',
+                                      month: 'short',
+                                      year: 'numeric',
+                                    })}
+                                  </span>
+                                </p>
                               </div>
-                              <p className="text-xs text-slate-600 leading-relaxed">{rev.body}</p>
-                              <p className="text-[11px] text-slate-400">
-                                {rev.author} · Certified Buyer, {rev.city} · {rev.daysAgo}
-                              </p>
-                            </div>
-                          ))}
-                        </div>
+                            ))}
+                          </div>
+                        )}
                       </section>
                     </div>
                   </div>
@@ -3345,11 +3731,11 @@ export default function App() {
                 </div>
               </header>
 
-              {/* Compact White Delivery Location Bar */}
+              {/* Compact White Delivery Location Bar (opens Saved Address Book) */}
               <div className="bg-white border-b border-slate-200/80">
                 <button
                   type="button"
-                  onClick={openAddressModal}
+                  onClick={() => openAddressBook('select')}
                   className="max-w-4xl w-full mx-auto px-3.5 sm:px-4 py-3 flex items-center justify-between gap-3 text-left hover:bg-blue-50/40 transition"
                 >
                   <div className="flex items-center gap-2.5 min-w-0">
@@ -3357,7 +3743,9 @@ export default function App() {
                       <i className="fa-solid fa-location-dot text-xs"></i>
                     </span>
                     <p className="text-xs sm:text-sm text-slate-700 truncate">
-                      <strong className="font-extrabold text-slate-900 mr-1.5">Deliver to:</strong>
+                      <strong className="font-extrabold text-slate-900 mr-1.5">
+                        Deliver to{savedAddress?.label ? ` (${savedAddress.label})` : ''}:
+                      </strong>
                       <span>
                         {displayAddressSummary ||
                           (deliveryPincode === DEFAULT_DELIVERY_PINCODE
@@ -3367,11 +3755,57 @@ export default function App() {
                       </span>
                     </p>
                   </div>
-                  <i className="fa-solid fa-chevron-right text-xs text-slate-400 shrink-0"></i>
+                  <span className="text-xs font-bold text-[#2874F0] shrink-0">Change</span>
                 </button>
               </div>
 
               <main className="max-w-4xl mx-auto px-3 sm:px-4 pt-3 space-y-3">
+                {/* Free Delivery Nudge Progress Bar (Synced with Firestore settings/delivery) */}
+                {displayedCartEntries.length > 0 && freeDeliveryThreshold > 0 && (
+                  <div
+                    className={`rounded-xl border px-4 py-3 shadow-2xs ${
+                      amountForFreeDelivery === 0
+                        ? 'bg-emerald-50 border-emerald-200'
+                        : 'bg-white border-blue-200/80'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2 text-xs sm:text-sm font-bold">
+                      <span
+                        className={`flex items-center gap-2 ${
+                          amountForFreeDelivery === 0 ? 'text-emerald-800' : 'text-slate-800'
+                        }`}
+                      >
+                        <i
+                          className={`fa-solid ${
+                            amountForFreeDelivery === 0
+                              ? 'fa-circle-check text-[#2E7D32]'
+                              : 'fa-truck-fast text-[#2874F0]'
+                          }`}
+                        ></i>
+                        {amountForFreeDelivery === 0 ? (
+                          <span>You unlocked FREE Delivery!</span>
+                        ) : (
+                          <span>
+                            Add <strong className="text-[#2874F0] font-mono">{formatINR(amountForFreeDelivery)}</strong> more for{' '}
+                            <strong className="text-[#2E7D32]">FREE Delivery</strong>
+                          </span>
+                        )}
+                      </span>
+                      <span className="text-[11px] font-mono font-bold text-slate-500 shrink-0 tabular-nums">
+                        {freeDeliveryProgressPct}%
+                      </span>
+                    </div>
+                    <div className="mt-2 h-2 w-full rounded-full bg-slate-200/80 overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all duration-300 ${
+                          amountForFreeDelivery === 0 ? 'bg-[#2E7D32]' : 'bg-[#2874F0]'
+                        }`}
+                        style={{ width: `${freeDeliveryProgressPct}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
                 {/* Clickable Coupons & Offers Card */}
                 <div className="bg-white rounded-xl border border-slate-200/80 shadow-2xs overflow-hidden">
                   <button
@@ -3389,7 +3823,7 @@ export default function App() {
                       </span>
                       <div className="min-w-0">
                         <p className="text-xs sm:text-sm font-bold text-slate-900 truncate">
-                          View all coupons and offers
+                          Apply Promo Code ({activePromoCodes.length} available)
                         </p>
                         {appliedCouponCode && couponDiscountAmount > 0 ? (
                           <p className="text-[11px] font-bold text-[#2E7D32] mt-0.5 truncate">
@@ -3397,7 +3831,9 @@ export default function App() {
                           </p>
                         ) : (
                           <p className="text-[11px] text-slate-500 mt-0.5 truncate">
-                            Save extra up to ₹500 with Smart Basket coupons
+                            {activePromoCodes[0]
+                              ? `Try ${activePromoCodes[0].code} — ${activePromoCodes[0].description || 'Instant discount'}`
+                              : 'Enter an active Smart Basket promo code'}
                           </p>
                         )}
                       </div>
@@ -3474,15 +3910,21 @@ export default function App() {
                                   {catName} · Standard Edition · Free Delivery
                                 </p>
 
-                                <div className="mt-1.5 flex items-center gap-1.5">
-                                  <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-sm bg-[#388E3C] text-white text-[10px] font-bold leading-none tabular-nums">
-                                    {(entry.product.rating || 4.4).toFixed(1)}
-                                    <i className="fa-solid fa-star text-[8px]"></i>
-                                  </span>
-                                  <span className="text-[11px] text-slate-400 tabular-nums">
-                                    ({(entry.product.reviews || 120).toLocaleString('en-IN')})
-                                  </span>
-                                </div>
+                                {(() => {
+                                  const cartItemStats = productReviewStats.get(entry.product.id);
+                                  if (!cartItemStats || cartItemStats.count === 0) return null;
+                                  return (
+                                    <div className="mt-1.5 flex items-center gap-1.5">
+                                      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-sm bg-[#388E3C] text-white text-[10px] font-bold leading-none tabular-nums">
+                                        {cartItemStats.avg.toFixed(1)}
+                                        <i className="fa-solid fa-star text-[8px]"></i>
+                                      </span>
+                                      <span className="text-[11px] text-slate-400 tabular-nums">
+                                        ({cartItemStats.count.toLocaleString('en-IN')})
+                                      </span>
+                                    </div>
+                                  );
+                                })()}
 
                                 <div className="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                                   {entryDiscount > 0 && (
@@ -3502,15 +3944,19 @@ export default function App() {
                                     </span>
                                   )}
                                 </div>
-                                {entry.product.stock <= 0 && (
+                                {entry.product.stock <= 0 ? (
                                   <span className="mt-1.5 inline-block px-2 py-0.5 rounded bg-rose-100 text-rose-700 text-[10px] font-extrabold uppercase">
                                     Out of Stock — Remove to Checkout
                                   </span>
-                                )}
+                                ) : entry.product.stock <= 5 ? (
+                                  <span className="mt-1.5 inline-block text-[11px] font-extrabold text-rose-600">
+                                    Only {entry.product.stock} left in stock!
+                                  </span>
+                                ) : null}
                               </div>
                             </div>
 
-                            <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between gap-3">
+                            <div className="mt-3 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
                               <div className="inline-flex items-center rounded-lg border border-slate-200 bg-slate-50">
                                 <button
                                   type="button"
@@ -3534,21 +3980,31 @@ export default function App() {
                                 </button>
                               </div>
 
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  showModal({
-                                    title: 'Remove Item',
-                                    message: `Remove ${entry.product.name} from cart?`,
-                                    confirmText: 'Remove',
-                                    onConfirm: () => updateCartQty(entry.product.id, 0),
-                                  })
-                                }
-                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-slate-600 hover:text-rose-600 hover:border-rose-200 hover:bg-rose-50 transition"
-                              >
-                                <i className="fa-solid fa-trash-can text-[11px]"></i>
-                                <span>Remove</span>
-                              </button>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => handleSaveForLater(entry.product)}
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-slate-700 hover:text-[#2874F0] hover:border-blue-200 hover:bg-blue-50 transition"
+                                >
+                                  <i className="fa-regular fa-heart text-[11px]"></i>
+                                  <span>Save for Later</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    showModal({
+                                      title: 'Remove Item',
+                                      message: `Remove ${entry.product.name} from cart?`,
+                                      confirmText: 'Remove',
+                                      onConfirm: () => updateCartQty(entry.product.id, 0),
+                                    })
+                                  }
+                                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-200 text-xs font-bold text-slate-600 hover:text-rose-600 hover:border-rose-200 hover:bg-rose-50 transition"
+                                >
+                                  <i className="fa-solid fa-trash-can text-[11px]"></i>
+                                  <span>Remove</span>
+                                </button>
+                              </div>
                             </div>
                           </div>
                         );
@@ -3567,6 +4023,24 @@ export default function App() {
                           <span className="font-mono font-semibold text-slate-900 tabular-nums">
                             {formatINR(displayedCartMrpTotal)}
                           </span>
+                        </div>
+
+                        <div className="flex items-center justify-between text-xs sm:text-sm text-slate-700">
+                          <span>Delivery Charge</span>
+                          {cartDeliveryFee === 0 ? (
+                            <span className="font-bold text-[#2E7D32] flex items-center gap-1.5">
+                              {baseDeliveryCharge > 0 && (
+                                <span className="text-slate-400 line-through font-mono font-normal text-xs">
+                                  {formatINR(baseDeliveryCharge)}
+                                </span>
+                              )}
+                              <span>FREE</span>
+                            </span>
+                          ) : (
+                            <span className="font-mono font-semibold text-slate-900 tabular-nums">
+                              {formatINR(cartDeliveryFee)}
+                            </span>
+                          )}
                         </div>
 
                         <div className="flex items-center justify-between text-xs sm:text-sm text-slate-700">
@@ -3644,6 +4118,78 @@ export default function App() {
                     </div>
                   </>
                 )}
+
+                {/* Saved for Later / Wishlist Section (Move cleanly between Wishlist and Cart) */}
+                {wishlistProducts.length > 0 && (
+                  <section className="bg-white rounded-xl border border-slate-200/80 shadow-2xs overflow-hidden mt-3">
+                    <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+                      <h2 className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
+                        <i className="fa-solid fa-heart text-[#E53935] text-xs"></i>
+                        <span>Saved for Later / Wishlist ({wishlistProducts.length})</span>
+                      </h2>
+                    </div>
+                    <div className="divide-y divide-slate-100">
+                      {wishlistProducts.map((wp) => {
+                        const isOos = wp.stock <= 0;
+                        return (
+                          <div key={wp.id} className="p-3.5 flex items-center gap-3">
+                            <button
+                              type="button"
+                              onClick={() => openProductDetail(wp)}
+                              className="w-16 h-16 rounded-lg bg-slate-50 border border-slate-200 overflow-hidden shrink-0"
+                            >
+                              <img
+                                src={wp.image}
+                                alt={wp.name}
+                                className={`w-full h-full object-cover ${isOos ? 'opacity-50' : ''}`}
+                              />
+                            </button>
+                            <div className="flex-1 min-w-0">
+                              <button
+                                type="button"
+                                onClick={() => openProductDetail(wp)}
+                                className="text-left text-xs sm:text-sm font-bold text-slate-900 line-clamp-1 hover:text-[#2874F0]"
+                              >
+                                {wp.name}
+                              </button>
+                              <div className="mt-0.5 flex items-center gap-2">
+                                <span className="text-sm font-extrabold font-mono text-slate-900">
+                                  {formatINR(wp.price)}
+                                </span>
+                                {isOos ? (
+                                  <span className="text-[10px] font-extrabold text-rose-600 uppercase">
+                                    Out of Stock
+                                  </span>
+                                ) : wp.stock <= 5 ? (
+                                  <span className="text-[10px] font-bold text-rose-600">
+                                    Only {wp.stock} left!
+                                  </span>
+                                ) : null}
+                              </div>
+                              <div className="mt-2 flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  disabled={isOos}
+                                  onClick={() => handleMoveWishlistToCart(wp)}
+                                  className="px-3 py-1 rounded-md bg-[#2874F0] hover:bg-[#1e60d5] text-white text-[11px] font-bold disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed transition"
+                                >
+                                  Move to Cart
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => toggleWishlist(wp.id)}
+                                  className="px-2.5 py-1 rounded-md border border-slate-200 text-[11px] font-bold text-slate-600 hover:text-rose-600 hover:bg-rose-50"
+                                >
+                                  Remove
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </section>
+                )}
               </main>
 
               {/* Floating White Rounded Sticky Checkout Bar above Bottom Nav */}
@@ -3717,18 +4263,108 @@ export default function App() {
                 </div>
                 <button
                   type="button"
-                  onClick={openAddressModal}
+                  onClick={() => openAddressBook('select')}
                   className="px-3 py-1.5 rounded-lg bg-blue-50 text-[#2874F0] text-xs font-bold hover:bg-blue-100 whitespace-nowrap"
                 >
-                  Change Address
+                  Saved Addresses ({savedAddresses.length})
                 </button>
               </div>
 
-              {/* Order Price Summary matching Cart Math */}
-              <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-2 text-xs sm:text-sm">
+              {/* Multiple Saved Delivery Addresses Quick Selector */}
+              {savedAddresses.length > 0 && (
+                <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-xs font-extrabold uppercase tracking-wider text-slate-500">
+                      Select Saved Delivery Address
+                    </h2>
+                    <button
+                      type="button"
+                      onClick={() => openAddressBook('select')}
+                      className="text-xs font-bold text-[#2874F0] hover:underline"
+                    >
+                      + Add / Edit
+                    </button>
+                  </div>
+                  <div className="grid sm:grid-cols-2 gap-2.5">
+                    {savedAddresses.map((addr) => {
+                      const active = selectedAddressId === addr.id;
+                      return (
+                        <button
+                          key={addr.id}
+                          type="button"
+                          onClick={() => applySelectedSavedAddress(addr)}
+                          className={`text-left p-3 rounded-lg border transition ${
+                            active
+                              ? 'border-[#2874F0] bg-blue-50/50 ring-1 ring-[#2874F0]/25'
+                              : 'border-slate-200 hover:border-slate-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 text-[10px] font-extrabold uppercase">
+                              {addr.label}
+                            </span>
+                            {active && (
+                              <i className="fa-solid fa-circle-check text-[#2874F0] text-xs"></i>
+                            )}
+                          </div>
+                          <p className="mt-1 text-xs font-bold text-slate-900 truncate">
+                            {addr.name} · {addr.phone}
+                          </p>
+                          <p className="mt-0.5 text-[11px] text-slate-600 line-clamp-2">
+                            {formatSavedAddressLine(addr)}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Promo Code & Order Price Summary matching Cart, Razorpay, COD, and Tax Invoice */}
+              <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-2.5 text-xs sm:text-sm">
+                <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-100">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <i className="fa-solid fa-ticket text-[#2874F0] text-xs"></i>
+                    {appliedCouponCode && checkoutCouponDiscount > 0 ? (
+                      <span className="text-xs font-bold text-[#2E7D32] truncate">
+                        {appliedCouponCode} applied (-{formatINR(checkoutCouponDiscount)})
+                      </span>
+                    ) : (
+                      <span className="text-xs font-semibold text-slate-700">Have a promo code?</span>
+                    )}
+                  </div>
+                  {appliedCouponCode && checkoutCouponDiscount > 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => setAppliedCouponCode('')}
+                      className="text-xs font-bold text-rose-600 hover:underline shrink-0"
+                    >
+                      Remove
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCouponError('');
+                        setCouponDraft('');
+                        setCouponModalOpen(true);
+                      }}
+                      className="text-xs font-bold text-[#2874F0] hover:underline shrink-0"
+                    >
+                      Apply Coupon
+                    </button>
+                  )}
+                </div>
+
                 <div className="flex items-center justify-between text-slate-600">
                   <span>Items Subtotal ({cartCount} {cartCount === 1 ? 'item' : 'items'})</span>
                   <span className="font-mono font-semibold text-slate-900 tabular-nums">{formatINR(cartTotal)}</span>
+                </div>
+                <div className="flex items-center justify-between text-slate-600">
+                  <span>Delivery Charge</span>
+                  <span className={`font-mono font-semibold tabular-nums ${checkoutDeliveryFee === 0 ? 'text-[#2E7D32]' : 'text-slate-900'}`}>
+                    {checkoutDeliveryFee === 0 ? 'FREE' : formatINR(checkoutDeliveryFee)}
+                  </span>
                 </div>
                 <div className="flex items-center justify-between text-slate-600">
                   <span>Platform Fee</span>
@@ -3736,7 +4372,7 @@ export default function App() {
                 </div>
                 {checkoutCouponDiscount > 0 && (
                   <div className="flex items-center justify-between text-[#2E7D32] font-semibold">
-                    <span>Coupon ({appliedCouponCode})</span>
+                    <span>Promo Discount ({appliedCouponCode})</span>
                     <span className="font-mono tabular-nums">-{formatINR(checkoutCouponDiscount)}</span>
                   </div>
                 )}
@@ -3903,6 +4539,102 @@ export default function App() {
                 <button type="button" onClick={() => setPage('orders')} className="px-4 py-2 rounded-lg bg-blue-50 text-[#2874F0] text-xs font-bold shrink-0">
                   My Orders
                 </button>
+              </div>
+
+              {/* Saved Delivery Addresses Card (Multiple Home / Work / Other Addresses) */}
+              <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <h2 className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
+                      <i className="fa-solid fa-location-dot text-[#2874F0]"></i>
+                      <span>My Saved Addresses ({savedAddresses.length})</span>
+                    </h2>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Save multiple Home, Work &amp; Other addresses with Indian Pincode lookup
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => openAddressBook('manage')}
+                    className="px-3.5 py-2 rounded-lg bg-[#2874F0] hover:bg-[#1e60d5] text-white text-xs font-bold shrink-0 transition"
+                  >
+                    Manage
+                  </button>
+                </div>
+                {savedAddresses.length > 0 && (
+                  <div className="grid sm:grid-cols-2 gap-2.5">
+                    {savedAddresses.slice(0, 2).map((addr) => (
+                      <div key={addr.id} className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs">
+                        <div className="flex items-center gap-1.5">
+                          <span className="px-1.5 py-0.5 rounded bg-white border border-slate-200 text-[10px] font-extrabold uppercase text-slate-700">
+                            {addr.label}
+                          </span>
+                          <span className="font-bold text-slate-900 truncate">{addr.name}</span>
+                        </div>
+                        <p className="mt-1 text-[11px] text-slate-600 line-clamp-2">
+                          {formatSavedAddressLine(addr)}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* My Wishlist (Saved for Later) Card */}
+              <div className="bg-white rounded-xl border border-slate-200 p-4 sm:p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
+                    <i className="fa-solid fa-heart text-[#E53935]"></i>
+                    <span>My Wishlist ({wishlistProducts.length})</span>
+                  </h2>
+                  {wishlistProducts.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setPage('cart')}
+                      className="text-xs font-bold text-[#2874F0] hover:underline"
+                    >
+                      Go to Cart
+                    </button>
+                  )}
+                </div>
+                {wishlistProducts.length === 0 ? (
+                  <p className="text-xs text-slate-500">
+                    Tap the heart icon on any product or Save for Later in Cart to build your Wishlist.
+                  </p>
+                ) : (
+                  <div className="grid sm:grid-cols-2 gap-2.5">
+                    {wishlistProducts.map((wp) => (
+                      <div key={wp.id} className="p-2.5 rounded-lg border border-slate-200 flex items-center gap-2.5">
+                        <img
+                          src={wp.image}
+                          alt={wp.name}
+                          className="w-12 h-12 rounded-md object-cover bg-slate-100 shrink-0"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="text-xs font-bold text-slate-900 truncate">{wp.name}</p>
+                          <p className="text-xs font-extrabold font-mono text-slate-800">{formatINR(wp.price)}</p>
+                          <div className="mt-1 flex items-center gap-2">
+                            <button
+                              type="button"
+                              disabled={wp.stock <= 0}
+                              onClick={() => handleMoveWishlistToCart(wp)}
+                              className="text-[11px] font-bold text-[#2874F0] hover:underline disabled:text-slate-400"
+                            >
+                              {wp.stock <= 0 ? 'Out of Stock' : 'Move to Cart'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => toggleWishlist(wp.id)}
+                              className="text-[11px] font-semibold text-rose-600 hover:underline"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <form onSubmit={handleProfileSave} className="bg-white rounded-xl border border-slate-200 p-5 space-y-4">
@@ -4670,7 +5402,7 @@ export default function App() {
                     setCouponDraft(e.target.value.toUpperCase());
                     if (couponError) setCouponError('');
                   }}
-                  placeholder="Enter coupon code (e.g. SMART100)"
+                  placeholder="Enter coupon code (e.g. SMART50)"
                   className="flex-1 h-11 px-3.5 rounded-lg bg-slate-50 border border-slate-300 text-sm font-semibold uppercase focus:bg-white focus:border-[#2874F0] focus:outline-none"
                 />
                 <button
@@ -4685,47 +5417,60 @@ export default function App() {
                 <p className="text-xs font-semibold text-rose-600">{couponError}</p>
               )}
 
-              <div className="space-y-2.5">
-                {AVAILABLE_COUPONS.map((c) => {
-                  const isApplied = appliedCouponCode === c.code && couponDiscountAmount > 0;
-                  const eligible = displayedCartSubtotal >= c.minOrder;
-                  return (
-                    <div
-                      key={c.code}
-                      className={`p-3.5 rounded-xl border flex items-center justify-between gap-3 ${
-                        isApplied ? 'border-[#2E7D32] bg-emerald-50/50' : 'border-slate-200 bg-slate-50/60'
-                      }`}
-                    >
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-xs font-extrabold text-[#2874F0] tracking-wide">
-                            {c.code}
-                          </span>
-                          <span className="text-xs font-bold text-slate-900">{c.title}</span>
+              <div className="space-y-2.5 max-h-72 overflow-y-auto">
+                {activePromoCodes.length === 0 ? (
+                  <p className="text-xs text-slate-500 text-center py-4">
+                    No active promo codes available right now.
+                  </p>
+                ) : (
+                  activePromoCodes.map((c) => {
+                    const currentSubtotal = Math.max(displayedCartSubtotal, cartTotal);
+                    const isApplied = appliedCouponCode.toUpperCase() === c.code.toUpperCase() && calculatePromoDiscount(currentSubtotal, c) > 0;
+                    const eligible = currentSubtotal >= c.minOrderValue;
+                    const promoTitle =
+                      c.discountType === 'percent'
+                        ? `${c.discountValue}% Off${c.maxDiscount ? ` (up to ${formatINR(c.maxDiscount)})` : ''}`
+                        : `Flat ${formatINR(c.discountValue)} Off`;
+                    return (
+                      <div
+                        key={c.docId || c.code}
+                        className={`p-3.5 rounded-xl border flex items-center justify-between gap-3 ${
+                          isApplied ? 'border-[#2E7D32] bg-emerald-50/50' : 'border-slate-200 bg-slate-50/60'
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-mono text-xs font-extrabold text-[#2874F0] tracking-wide">
+                              {c.code}
+                            </span>
+                            <span className="text-xs font-bold text-slate-900">{promoTitle}</span>
+                          </div>
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            {c.description || `Valid on orders of ${formatINR(c.minOrderValue)} & above`}
+                          </p>
                         </div>
-                        <p className="text-[11px] text-slate-500 mt-0.5">{c.subtitle}</p>
+                        {isApplied ? (
+                          <button
+                            type="button"
+                            onClick={() => setAppliedCouponCode('')}
+                            className="px-3 py-1.5 rounded-lg bg-rose-50 text-rose-600 text-xs font-bold shrink-0"
+                          >
+                            Remove
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={!eligible}
+                            onClick={() => handleApplyCouponCode(c.code, currentSubtotal)}
+                            className="px-3.5 py-1.5 rounded-lg bg-[#2874F0] text-white text-xs font-bold hover:bg-[#1e60d5] disabled:opacity-45 disabled:cursor-not-allowed shrink-0"
+                          >
+                            Apply
+                          </button>
+                        )}
                       </div>
-                      {isApplied ? (
-                        <button
-                          type="button"
-                          onClick={() => setAppliedCouponCode('')}
-                          className="px-3 py-1.5 rounded-lg bg-rose-50 text-rose-600 text-xs font-bold shrink-0"
-                        >
-                          Remove
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          disabled={!eligible}
-                          onClick={() => handleApplyCouponCode(c.code)}
-                          className="px-3.5 py-1.5 rounded-lg bg-[#2874F0] text-white text-xs font-bold hover:bg-[#1e60d5] disabled:opacity-45 disabled:cursor-not-allowed shrink-0"
-                        >
-                          Apply
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
+                    );
+                  })
+                )}
               </div>
             </div>
           </div>
@@ -5301,6 +6046,36 @@ export default function App() {
         </div>
       )}
 
+      {/* Multiple Saved Delivery Addresses Book Modal */}
+      <AddressBookModal
+        open={addressBookOpen}
+        onClose={() => setAddressBookOpen(false)}
+        addresses={savedAddresses}
+        selectedAddressId={selectedAddressId}
+        defaultName={currentUser?.name || checkoutName}
+        defaultPhone={currentUser?.phone || checkoutPhone}
+        onSaveAddresses={handleSaveAddressBook}
+        onSelectAddress={applySelectedSavedAddress}
+        mode={addressBookMode}
+      />
+
+      {/* Verified Purchase Review Modal (Delivered Orders Only) */}
+      <VerifiedReviewModal
+        open={Boolean(reviewModalTarget)}
+        product={reviewModalTarget?.product || null}
+        order={reviewModalTarget?.order || null}
+        existingReview={reviewModalTarget?.existing || null}
+        onClose={() => setReviewModalTarget(null)}
+        onSubmit={handleSubmitVerifiedReview}
+      />
+
+      {/* Printable GST Tax Invoice Modal with Promo Code & Delivery Fee Breakdown */}
+      <TaxInvoiceModal
+        order={invoiceModalOrder}
+        onClose={() => setInvoiceModalOrder(null)}
+      />
+
     </div>
   );
 }
+

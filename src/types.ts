@@ -75,7 +75,11 @@ export interface DeliveryBoy {
   created_at: string;
 }
 
+export type AddressLabel = 'Home' | 'Work' | 'Other';
+
 export interface SavedAddress {
+  id: string;
+  label: AddressLabel;
   name: string;
   phone: string;
   houseStreet: string;
@@ -83,6 +87,70 @@ export interface SavedAddress {
   city: string;
   state?: string;
   pincode: string;
+  isDefault?: boolean;
+  updatedAt?: string;
+}
+
+export interface DeliverySettings {
+  freeDeliveryThreshold: number;
+  deliveryCharge: number;
+  platformFee: number;
+  updatedAt?: string;
+}
+
+export const DEFAULT_DELIVERY_SETTINGS: DeliverySettings = {
+  freeDeliveryThreshold: 499,
+  deliveryCharge: 40,
+  platformFee: 10,
+};
+
+export interface PromoCode {
+  id: string;
+  docId?: string;
+  code: string;
+  discountType: 'flat' | 'percent';
+  discountValue: number;
+  maxDiscount?: number;
+  minOrderValue: number;
+  description?: string;
+  active: boolean;
+  usedCount?: number;
+  created_at: string;
+}
+
+export interface ProductReview {
+  id: string;
+  docId?: string;
+  productId: number;
+  productDocId?: string;
+  orderId: number;
+  orderDocId?: string;
+  userId: string;
+  userName: string;
+  rating: number;
+  title: string;
+  comment: string;
+  verifiedPurchase: boolean;
+  created_at: string;
+}
+
+export function calculatePromoDiscount(subtotal: number, promo?: PromoCode | null): number {
+  if (!promo || !promo.active) return 0;
+  const cleanSubtotal = Math.max(0, Number(subtotal) || 0);
+  if (cleanSubtotal <= 0 || cleanSubtotal < Number(promo.minOrderValue || 0)) return 0;
+  if (promo.discountType === 'percent') {
+    const pct = Math.min(100, Math.max(0, Number(promo.discountValue) || 0));
+    const raw = Math.round((cleanSubtotal * pct) / 100);
+    const cap = promo.maxDiscount && promo.maxDiscount > 0 ? Math.min(raw, promo.maxDiscount) : raw;
+    return Math.min(cleanSubtotal, Math.max(0, cap));
+  }
+  const flat = Math.max(0, Number(promo.discountValue) || 0);
+  return Math.min(cleanSubtotal, Math.round(flat));
+}
+
+export function formatSavedAddressLine(addr: Pick<SavedAddress, 'houseStreet' | 'area' | 'city' | 'state' | 'pincode'>): string {
+  const parts = [addr.houseStreet, addr.area, addr.city, addr.state].filter(Boolean);
+  return `${parts.join(', ')}${addr.pincode ? ` - ${addr.pincode}` : ''}`;
 }
 
 export const SELLER_PLATFORM_COMMISSION_RATE = 0.1;
@@ -209,9 +277,13 @@ export interface Order {
   address: string;
   total_amount: number;
   total?: number;
+  subtotal?: number;
+  deliveryFee?: number;
   platformFee?: number;
   couponCode?: string;
   couponDiscount?: number;
+  stockDeducted?: boolean;
+  stockRestored?: boolean;
   paymentMethod?: string;
   status: OrderStatus;
   courierName?: string;

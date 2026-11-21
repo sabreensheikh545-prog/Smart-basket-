@@ -17,16 +17,21 @@ import {
   subscribeAllSellersFirestore,
   subscribeAllUsersFirestore,
   subscribeDeliveryBoysFirestore,
+  subscribeDeliverySettingsFirestore,
+  subscribePromoCodesFirestore,
   toggleDeliveryBoyStatusFirestore,
   toggleUserBlockFirestore,
   updateOrderStatusFirestore,
   updateOrderTrackingFirestore,
   updateSellerStatusFirestore,
 } from '../services/firestoreService';
+import { AdminPromosPanel } from './AdminPromosPanel';
 import {
   ASSETS,
   IMAGE_CHOICES,
   getBootstrapData,
+  getDeliverySettingsLocal,
+  getPromoCodesLocal,
   getStoredDeliveryBoysLocal,
   getStoredSellersLocal,
   loginAdminLocal,
@@ -37,11 +42,14 @@ import {
 import {
   COURIER_PARTNERS,
   Category,
+  DEFAULT_DELIVERY_SETTINGS,
   DeliveryBoy,
+  DeliverySettings,
   ORDER_STATUS_OPTIONS,
   Order,
   OrderStatus,
   Product,
+  PromoCode,
   SellerProfile,
   User,
   calculateSellerEarnings,
@@ -62,6 +70,7 @@ type AdminTab =
   | 'order_detail'
   | 'delivery_boys'
   | 'sellers'
+  | 'promos'
   | 'users'
   | 'settings';
 
@@ -150,6 +159,10 @@ export const AdminView: React.FC<Props> = ({
   const [liveUsers, setLiveUsers] = useState<User[]>(users);
   const [liveSellers, setLiveSellers] = useState<SellerProfile[]>(() => getStoredSellersLocal());
   const [liveDeliveryBoys, setLiveDeliveryBoys] = useState<DeliveryBoy[]>(() => getStoredDeliveryBoysLocal());
+  const [deliverySettings, setDeliverySettings] = useState<DeliverySettings>(() =>
+    getDeliverySettingsLocal() || DEFAULT_DELIVERY_SETTINGS
+  );
+  const [livePromos, setLivePromos] = useState<PromoCode[]>(() => getPromoCodesLocal());
 
   // Admin Login Form
   const [loginUser, setLoginUser] = useState('Seraj');
@@ -221,11 +234,15 @@ export const AdminView: React.FC<Props> = ({
     );
     const unsubSellers = subscribeAllSellersFirestore((list) => setLiveSellers(list));
     const unsubRiders = subscribeDeliveryBoysFirestore((list) => setLiveDeliveryBoys(list));
+    const unsubDelivery = subscribeDeliverySettingsFirestore((settings) => setDeliverySettings(settings));
+    const unsubPromos = subscribePromoCodesFirestore((promos) => setLivePromos(promos));
     return () => {
       unsubOrders();
       unsubUsers();
       unsubSellers();
       unsubRiders();
+      unsubDelivery();
+      unsubPromos();
     };
   }, [isAdminLoggedIn, showModal]);
 
@@ -880,14 +897,16 @@ export const AdminView: React.FC<Props> = ({
           </div>
 
           <nav className="hidden lg:flex items-center gap-4 text-xs font-semibold text-blue-100">
-            {(['dashboard', 'categories', 'products', 'orders', 'delivery_boys', 'sellers', 'users', 'settings'] as AdminTab[]).map((t) => (
+            {(['dashboard', 'categories', 'products', 'orders', 'promos', 'delivery_boys', 'sellers', 'users', 'settings'] as AdminTab[]).map((t) => (
               <button
                 key={t}
                 type="button"
                 onClick={() => setAdminTab(t)}
                 className={`whitespace-nowrap transition inline-flex items-center gap-1 ${adminTab === t ? 'text-[#FFE500] font-bold' : 'hover:text-white'}`}
               >
-                <span className="capitalize">{t === 'delivery_boys' ? 'Delivery Boys' : t}</span>
+                <span className="capitalize">
+                  {t === 'delivery_boys' ? 'Delivery Boys' : t === 'promos' ? 'Coupons & Delivery' : t}
+                </span>
                 {t === 'sellers' && sellerAttentionCount > 0 && (
                   <span className="px-1.5 py-0.2 rounded-full bg-[#FFE500] text-[#2874F0] text-[10px] font-extrabold tabular-nums">
                     {sellerAttentionCount}
@@ -958,6 +977,7 @@ export const AdminView: React.FC<Props> = ({
             { id: 'categories', label: 'Categories', icon: 'fa-tags' },
             { id: 'products', label: 'Products', icon: 'fa-boxes-stacked' },
             { id: 'orders', label: 'Orders', icon: 'fa-receipt' },
+            { id: 'promos', label: 'Promo Codes & Delivery', icon: 'fa-ticket' },
             { id: 'delivery_boys', label: 'Delivery Boys', icon: 'fa-motorcycle', badge: pendingKycRiders.length },
             { id: 'sellers', label: 'Sellers Management', icon: 'fa-store', badge: sellerAttentionCount },
             { id: 'users', label: 'Users', icon: 'fa-users' },
@@ -1631,6 +1651,41 @@ export const AdminView: React.FC<Props> = ({
                     <span className="text-sm font-extrabold font-mono tabular-nums">{formatINR(it.price * it.quantity)}</span>
                   </div>
                 ))}
+              </div>
+              <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-100 space-y-1.5 text-xs">
+                <div className="flex justify-between text-slate-600">
+                  <span>Items Subtotal</span>
+                  <span className="font-mono font-semibold">
+                    {formatINR(
+                      activeOrder.subtotal ??
+                        activeOrder.items.reduce((sum, it) => sum + it.price * it.quantity, 0)
+                    )}
+                  </span>
+                </div>
+                {Number(activeOrder.couponDiscount || 0) > 0 && (
+                  <div className="flex justify-between text-emerald-700 font-semibold">
+                    <span>Promo Code ({activeOrder.couponCode || 'COUPON'})</span>
+                    <span className="font-mono">-{formatINR(Number(activeOrder.couponDiscount || 0))}</span>
+                  </div>
+                )}
+                <div className="flex justify-between text-slate-600">
+                  <span>Delivery Charge</span>
+                  <span className="font-mono font-semibold">
+                    {Number(activeOrder.deliveryFee || 0) > 0
+                      ? formatINR(Number(activeOrder.deliveryFee || 0))
+                      : 'FREE'}
+                  </span>
+                </div>
+                {Number(activeOrder.platformFee || 0) > 0 && (
+                  <div className="flex justify-between text-slate-600">
+                    <span>Platform Fee</span>
+                    <span className="font-mono font-semibold">{formatINR(Number(activeOrder.platformFee || 0))}</span>
+                  </div>
+                )}
+                <div className="pt-1.5 border-t border-slate-200 flex justify-between text-sm font-extrabold text-slate-900">
+                  <span>Grand Total</span>
+                  <span className="font-mono tabular-nums">{formatINR(activeOrder.total_amount)}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -2342,6 +2397,16 @@ export const AdminView: React.FC<Props> = ({
               </button>
             </form>
           </div>
+        )}
+
+        {adminTab === 'promos' && (
+          <AdminPromosPanel
+            deliverySettings={deliverySettings}
+            promoCodes={livePromos}
+            showLoader={showLoader}
+            hideLoader={hideLoader}
+            showModal={showModal}
+          />
         )}
       </main>
 
